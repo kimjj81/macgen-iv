@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from .base import BackendAdapter
-from .ltx23 import LTX23Backend
-from .wan22 import Wan22Backend
+from .mlx import MLXBackend
+from .stub import StubBackend
 
 
-def create_backend(name: str, *, dry_run: bool = False) -> BackendAdapter:
-    if name == "wan2.2":
-        return Wan22Backend(dry_run=dry_run)
-    if name == "ltx2.3":
-        return LTX23Backend(dry_run=dry_run)
+def create_backend(name: str) -> BackendAdapter:
+    if name == "stub":
+        return StubBackend()
+    if name == "mlx":
+        return MLXBackend()
     raise ValueError(f"Unknown backend: {name}")
 
 

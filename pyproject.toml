@@ -10,13 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "macgen-iv contributors" }]
-dependencies = []
+dependencies = ["typer>=0.12"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 mlx = ["mlx>=0.24"]
 
 [project.scripts]
+fastgen-profile = "fastgen_profiler.cli:main"
 fastgen-profiler = "fastgen_profiler.cli:main"
 
 [tool.setuptools.packages.find]
