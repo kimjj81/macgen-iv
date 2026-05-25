@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import sys
+import time
 from typing import Annotated
+import uuid
 
 import click
 import typer
@@ -16,6 +19,7 @@ from .models import (
     IMPORT_SOURCES,
     ModelCandidate,
     candidate_to_dict,
+    discover_generation_model_dirs,
     direct_model_candidate,
     discover_import_dirs,
     discover_models,
@@ -35,6 +39,14 @@ PRESET_CHOICES = (
     "cache-experiment",
     "compile-experiment",
 )
+PROFILE_PRESETS = (
+    "smoke",
+    "small-baseline",
+    "quality-threshold",
+    "cache-experiment",
+    "compile-experiment",
+    "stress",
+)
 MODEL_CHOICES = ("wan2.2", "ltx2.3")
 BACKEND_CHOICES = ("mlx", "stub")
 QUANT_CHOICES = ("none", "q8", "q8p", "q4")
@@ -49,7 +61,11 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
-models_app = typer.Typer(help="Inspect local model directories.")
+models_app = typer.Typer(
+    help="Inspect local model directories.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 app.add_typer(models_app, name="models")
 
 
@@ -64,6 +80,13 @@ class PresetRun:
     cache: str
     compile: str
     save_video: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileRunSpec:
+    preset: str
+    variant_label: str
+    run: PresetRun
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,21 +126,31 @@ def root_callback(ctx: typer.Context) -> None:
     raise typer.Exit(0)
 
 
+@models_app.callback()
+def models_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    if sys.stdin.isatty():
+        raise typer.Exit(interactive_list_models())
+    typer.echo(ctx.get_help())
+    raise typer.Exit(0)
+
+
 @app.command()
 def run(
     preset: Annotated[
         str | None,
         typer.Option("--preset", case_sensitive=False, help="Benchmark preset name."),
     ] = None,
-    model: Annotated[str, typer.Option("--model", case_sensitive=False)] = ...,
-    backend: Annotated[str, typer.Option("--backend", case_sensitive=False)] = ...,
+    model: Annotated[str | None, typer.Option("--model", case_sensitive=False)] = None,
+    backend: Annotated[str | None, typer.Option("--backend", case_sensitive=False)] = None,
     model_dir: Annotated[list[Path] | None, typer.Option("--model-dir")] = None,
     model_path: Annotated[Path | None, typer.Option("--model-path")] = None,
     model_id: Annotated[str | None, typer.Option("--model-id")] = None,
     env_file: Annotated[Path, typer.Option("--env-file")] = Path(".env"),
-    prompt: Annotated[str, typer.Option("--prompt")] = ...,
+    prompt: Annotated[str | None, typer.Option("--prompt")] = None,
     negative_prompt: Annotated[str, typer.Option("--negative-prompt")] = "",
-    seed: Annotated[int, typer.Option("--seed")] = ...,
+    seed: Annotated[int | None, typer.Option("--seed")] = None,
     width: Annotated[int | None, typer.Option("--width")] = None,
     height: Annotated[int | None, typer.Option("--height")] = None,
     frames: Annotated[int | None, typer.Option("--frames")] = None,
@@ -127,15 +160,15 @@ def run(
     quant: Annotated[str | None, typer.Option("--quant", case_sensitive=False)] = None,
     cache: Annotated[str | None, typer.Option("--cache", case_sensitive=False)] = None,
     compile: Annotated[str | None, typer.Option("--compile", case_sensitive=False)] = None,
-    output_dir: Annotated[Path, typer.Option("--output-dir")] = ...,
-    result_jsonl: Annotated[Path, typer.Option("--result-jsonl")] = ...,
+    output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
+    result_jsonl: Annotated[Path | None, typer.Option("--result-jsonl")] = None,
     save_video: Annotated[bool | None, typer.Option("--save-video/--no-save-video")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    options = RunOptions(
-        preset=_validate_optional_choice(preset, PRESET_CHOICES, "preset"),
-        model=_validate_choice(model, MODEL_CHOICES, "model"),
-        backend=_validate_choice(backend, BACKEND_CHOICES, "backend"),
+    options = _complete_run_options(
+        preset=preset,
+        model=model,
+        backend=backend,
         model_dir=model_dir or [],
         model_path=model_path,
         model_id=model_id,
@@ -149,15 +182,59 @@ def run(
         fps=fps,
         steps=steps,
         guidance=guidance,
-        quant=_validate_optional_choice(quant, QUANT_CHOICES, "quant"),
-        cache=_validate_optional_choice(cache, CACHE_CHOICES, "cache"),
-        compile=_validate_optional_choice(compile, COMPILE_CHOICES, "compile"),
+        quant=quant,
+        cache=cache,
+        compile=compile,
         output_dir=output_dir,
         result_jsonl=result_jsonl,
         save_video=save_video,
         dry_run=dry_run,
     )
     raise typer.Exit(run_command(options))
+
+
+@app.command()
+def profile(
+    model: Annotated[str | None, typer.Option("--model", case_sensitive=False)] = None,
+    backend: Annotated[str | None, typer.Option("--backend", case_sensitive=False)] = None,
+    model_dir: Annotated[list[Path] | None, typer.Option("--model-dir")] = None,
+    model_path: Annotated[Path | None, typer.Option("--model-path")] = None,
+    model_id: Annotated[str | None, typer.Option("--model-id")] = None,
+    env_file: Annotated[Path, typer.Option("--env-file")] = Path(".env"),
+    prompt: Annotated[str | None, typer.Option("--prompt")] = None,
+    negative_prompt: Annotated[str, typer.Option("--negative-prompt")] = "",
+    seed: Annotated[int | None, typer.Option("--seed")] = None,
+    fps: Annotated[int, typer.Option("--fps")] = DEFAULT_FPS,
+    guidance: Annotated[float | None, typer.Option("--guidance")] = None,
+    quant: Annotated[str | None, typer.Option("--quant", case_sensitive=False)] = None,
+    cache: Annotated[str | None, typer.Option("--cache", case_sensitive=False)] = None,
+    compile: Annotated[str | None, typer.Option("--compile", case_sensitive=False)] = None,
+    output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
+    results_dir: Annotated[Path, typer.Option("--results-dir")] = Path("artifacts/profiles"),
+    result_jsonl: Annotated[Path | None, typer.Option("--result-jsonl")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    options = _complete_profile_options(
+        model=model,
+        backend=backend,
+        model_dir=model_dir or [],
+        model_path=model_path,
+        model_id=model_id,
+        env_file=env_file,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        fps=fps,
+        guidance=guidance,
+        quant=quant,
+        cache=cache,
+        compile=compile,
+        output_dir=output_dir,
+        results_dir=results_dir,
+        result_jsonl=result_jsonl,
+        dry_run=dry_run,
+    )
+    raise typer.Exit(profile_command(options))
 
 
 @app.command()
@@ -172,28 +249,11 @@ def report(
 
 @models_app.command("list")
 def models_list(
-    model: Annotated[str, typer.Option("--model", case_sensitive=False)] = ...,
+    model: Annotated[str | None, typer.Option("--model", case_sensitive=False)] = None,
     model_dir: Annotated[list[Path] | None, typer.Option("--model-dir")] = None,
     env_file: Annotated[Path, typer.Option("--env-file")] = Path(".env"),
 ) -> None:
-    model = _validate_choice(model, MODEL_CHOICES, "model")
-    roots = model_dirs_from_sources(
-        model=model,
-        cli_dirs=model_dir or [],
-        env_file=env_file,
-    )
-    candidates = discover_models(roots, model=model)
-    if not candidates:
-        typer.echo("No model candidates found.")
-        return
-
-    for index, candidate in enumerate(candidates, start=1):
-        data = candidate_to_dict(candidate)
-        markers = ",".join(data["markers"])
-        typer.echo(
-            f"{index}. {data['id']} "
-            f"family={data['model_family_guess']} markers={markers} path={data['path']}"
-        )
+    _print_model_candidates(model=model, model_dir=model_dir or [], env_file=env_file)
 
 
 @models_app.command("import")
@@ -245,10 +305,268 @@ def run_command(options: RunOptions) -> int:
             result_jsonl=options.result_jsonl,
             save_video=preset_run.save_video,
             dry_run=options.dry_run,
+            preset=preset,
+            variant_label=_variant_label(preset, preset_run) if preset else "manual",
         )
         records = Profiler(backend).run(config)
         append_jsonl(options.result_jsonl, records)
     return 0
+
+
+def profile_command(options: RunOptions) -> int:
+    profile_id = str(uuid.uuid4())
+    profile_name = f"{options.model}-full-preset-suite"
+    specs, skipped_specs = _profile_run_specs(options)
+    candidate = _select_model_candidate(options)
+    if options.backend == "mlx" and candidate is None:
+        all_records = []
+        for spec in specs:
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=spec,
+                error=(
+                    "model selection required: pass --model-path, --model-id, --model-dir, "
+                    "or configure FASTGEN_MODEL_DIRS in .env"
+                ),
+            )
+            append_jsonl(options.result_jsonl, records)
+            all_records.extend(record.to_dict() for record in records)
+        report_path = options.result_jsonl.with_suffix(".md")
+        report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
+        _print_profile_summary(all_records, options.result_jsonl, report_path)
+        return 1
+
+    backend = create_backend(options.backend)
+    all_records = []
+    for spec in specs:
+        config = _profile_run_config(
+            options=options,
+            candidate=candidate,
+            profile_id=profile_id,
+            profile_name=profile_name,
+            spec=spec,
+        )
+        records = Profiler(backend).run(config)
+        append_jsonl(options.result_jsonl, records)
+        all_records.extend(record.to_dict() for record in records)
+
+    for spec in skipped_specs:
+        records = _skipped_profile_records(
+            options=options,
+            profile_id=profile_id,
+            profile_name=profile_name,
+            spec=spec,
+            reason="skipped: stress preset is currently limited to wan2.2",
+        )
+        append_jsonl(options.result_jsonl, records)
+        all_records.extend(record.to_dict() for record in records)
+
+    report_path = options.result_jsonl.with_suffix(".md")
+    report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
+    _print_profile_summary(all_records, options.result_jsonl, report_path)
+    return 0
+
+
+def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_file: Path) -> None:
+    model = _validate_optional_choice(model, MODEL_CHOICES, "model")
+    models = (model,) if model else MODEL_CHOICES
+    all_candidates = []
+    seen_paths: set[str] = set()
+    for target_model in models:
+        roots = model_dirs_from_sources(
+            model=target_model,
+            cli_dirs=model_dir,
+            env_file=env_file,
+        )
+        candidates = discover_models(roots, model=target_model)
+        for candidate in candidates:
+            key = str(candidate.path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            all_candidates.append(candidate)
+
+    if not all_candidates:
+        target = model if model else "wan2.2/ltx2.3"
+        typer.echo(f"No generation model candidates found for {target}.")
+        return
+
+    for index, candidate in enumerate(all_candidates, start=1):
+        data = candidate_to_dict(candidate)
+        markers = ",".join(data["markers"])
+        typer.echo(
+            f"{index}. {data['id']} "
+            f"family={data['model_family_guess']} markers={markers} path={data['path']}"
+        )
+
+
+def _complete_run_options(
+    *,
+    preset: str | None,
+    model: str | None,
+    backend: str | None,
+    model_dir: list[Path],
+    model_path: Path | None,
+    model_id: str | None,
+    env_file: Path,
+    prompt: str | None,
+    negative_prompt: str,
+    seed: int | None,
+    width: int | None,
+    height: int | None,
+    frames: int | None,
+    fps: int,
+    steps: int | None,
+    guidance: float | None,
+    quant: str | None,
+    cache: str | None,
+    compile: str | None,
+    output_dir: Path | None,
+    result_jsonl: Path | None,
+    save_video: bool | None,
+    dry_run: bool,
+) -> RunOptions:
+    interactive = sys.stdin.isatty()
+    preset = _validate_optional_choice(preset, PRESET_CHOICES, "preset")
+    model = _validate_optional_choice(model, MODEL_CHOICES, "model")
+    backend = _validate_optional_choice(backend, BACKEND_CHOICES, "backend")
+    quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
+    cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
+    compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+
+    if interactive:
+        model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
+        backend = backend or _prompt_choice("Backend", BACKEND_CHOICES, "stub")
+        preset = preset or _prompt_choice("Preset", PRESET_CHOICES, "smoke")
+        prompt = prompt if prompt is not None else _prompt_text("Prompt", "test prompt")
+        seed = seed if seed is not None else _prompt_int("Seed", 1)
+        output_dir = output_dir or Path(_prompt_text("Output directory", "artifacts/videos"))
+        result_jsonl = result_jsonl or Path(_prompt_text("Result JSONL", "artifacts/results.jsonl"))
+    else:
+        missing = []
+        if model is None:
+            missing.append("model")
+        if backend is None:
+            missing.append("backend")
+        if prompt is None:
+            missing.append("prompt")
+        if seed is None:
+            missing.append("seed")
+        if output_dir is None:
+            missing.append("output-dir")
+        if result_jsonl is None:
+            missing.append("result-jsonl")
+        if missing:
+            raise typer.BadParameter(
+                "Missing required options: "
+                + ", ".join(f"--{name}" for name in missing)
+            )
+
+    return RunOptions(
+        preset=preset,
+        model=model,
+        backend=backend,
+        model_dir=model_dir,
+        model_path=model_path,
+        model_id=model_id,
+        env_file=env_file,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        width=width,
+        height=height,
+        frames=frames,
+        fps=fps,
+        steps=steps,
+        guidance=guidance,
+        quant=quant,
+        cache=cache,
+        compile=compile,
+        output_dir=output_dir,
+        result_jsonl=result_jsonl,
+        save_video=save_video,
+        dry_run=dry_run,
+    )
+
+
+def _complete_profile_options(
+    *,
+    model: str | None,
+    backend: str | None,
+    model_dir: list[Path],
+    model_path: Path | None,
+    model_id: str | None,
+    env_file: Path,
+    prompt: str | None,
+    negative_prompt: str,
+    seed: int | None,
+    fps: int,
+    guidance: float | None,
+    quant: str | None,
+    cache: str | None,
+    compile: str | None,
+    output_dir: Path | None,
+    results_dir: Path,
+    result_jsonl: Path | None,
+    dry_run: bool,
+) -> RunOptions:
+    interactive = sys.stdin.isatty()
+    model = _validate_optional_choice(model, MODEL_CHOICES, "model")
+    backend = _validate_optional_choice(backend, BACKEND_CHOICES, "backend")
+    quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
+    cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
+    compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+
+    if interactive:
+        model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
+        backend = backend or _prompt_choice("Backend", BACKEND_CHOICES, "stub")
+        prompt = prompt if prompt is not None else _prompt_text("Prompt", "test prompt")
+        seed = seed if seed is not None else _prompt_int("Seed", 1)
+    else:
+        missing = []
+        if model is None:
+            missing.append("model")
+        if backend is None:
+            missing.append("backend")
+        if prompt is None:
+            missing.append("prompt")
+        if seed is None:
+            missing.append("seed")
+        if missing:
+            raise typer.BadParameter(
+                "Missing required options: "
+                + ", ".join(f"--{name}" for name in missing)
+            )
+
+    output_dir = output_dir or Path("artifacts/videos")
+    result_jsonl = result_jsonl or _default_profile_jsonl(results_dir=results_dir, model=model)
+    return RunOptions(
+        preset=None,
+        model=model,
+        backend=backend,
+        model_dir=model_dir,
+        model_path=model_path,
+        model_id=model_id,
+        env_file=env_file,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        width=None,
+        height=None,
+        frames=None,
+        fps=fps,
+        steps=None,
+        guidance=guidance,
+        quant=quant,
+        cache=cache,
+        compile=compile,
+        output_dir=output_dir,
+        result_jsonl=result_jsonl,
+        save_video=None,
+        dry_run=dry_run,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,11 +594,9 @@ def interactive_main_menu() -> int:
         typer.echo("4. Exit")
         choice = input("Command number: ").strip()
         if choice == "1":
-            typer.echo("Run profile from the CLI with `fastgen-profile run --help`.")
-            return 0
+            return interactive_run_profile()
         if choice == "2":
-            typer.echo("List models from the CLI with `fastgen-profile models list --help`.")
-            return 0
+            return interactive_list_models()
         if choice == "3":
             return interactive_import_model_dirs()
         if choice == "4":
@@ -308,6 +624,40 @@ def interactive_import_model_dirs() -> int:
         dry_run=False,
         require_confirmation=False,
     )
+
+
+def interactive_run_profile() -> int:
+    options = _complete_run_options(
+        preset=None,
+        model=None,
+        backend=None,
+        model_dir=[],
+        model_path=None,
+        model_id=None,
+        env_file=Path(".env"),
+        prompt=None,
+        negative_prompt="",
+        seed=None,
+        width=None,
+        height=None,
+        frames=None,
+        fps=DEFAULT_FPS,
+        steps=None,
+        guidance=None,
+        quant=None,
+        cache=None,
+        compile=None,
+        output_dir=None,
+        result_jsonl=None,
+        save_video=None,
+        dry_run=False,
+    )
+    return run_command(options)
+
+
+def interactive_list_models() -> int:
+    _print_model_candidates(model=None, model_dir=[], env_file=Path(".env"))
+    return 0
 
 
 def _select_preset_if_needed(options: RunOptions) -> str | None:
@@ -471,6 +821,250 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
     raise typer.BadParameter(f"Unknown preset: {preset}")
 
 
+def _profile_run_specs(options: RunOptions) -> tuple[list[ProfileRunSpec], list[ProfileRunSpec]]:
+    specs: list[ProfileRunSpec] = []
+    skipped: list[ProfileRunSpec] = []
+    for preset in PROFILE_PRESETS:
+        if preset == "stress" and options.model != "wan2.2":
+            skipped.extend(
+                ProfileRunSpec(
+                    preset=preset,
+                    variant_label=f"{preset}_steps-{steps}",
+                    run=PresetRun(
+                        width=1280,
+                        height=720,
+                        frames=81,
+                        steps=steps,
+                        guidance=options.guidance if options.guidance is not None else DEFAULT_GUIDANCE,
+                        quant=options.quant or "none",
+                        cache="none",
+                        compile="off",
+                        save_video=False,
+                    ),
+                )
+                for steps in (24, 40)
+            )
+            continue
+        for preset_run in _preset_runs(preset, options):
+            specs.append(
+                ProfileRunSpec(
+                    preset=preset,
+                    variant_label=_variant_label(preset, preset_run),
+                    run=preset_run,
+                )
+            )
+    return specs, skipped
+
+
+def _variant_label(preset: str | None, preset_run: PresetRun) -> str:
+    if preset is None:
+        return "manual"
+    if preset == "small-baseline":
+        return f"{preset}_guidance-{preset_run.guidance:g}_quant-{preset_run.quant}"
+    if preset == "quality-threshold":
+        return f"{preset}_steps-{preset_run.steps}"
+    if preset == "stress":
+        return f"{preset}_steps-{preset_run.steps}"
+    if preset == "cache-experiment":
+        return f"{preset}_cache-{preset_run.cache}"
+    if preset == "compile-experiment":
+        return f"{preset}_compile-{preset_run.compile}"
+    return preset
+
+
+def _profile_run_config(
+    *,
+    options: RunOptions,
+    candidate: ModelCandidate | None,
+    profile_id: str,
+    profile_name: str,
+    spec: ProfileRunSpec,
+) -> RunConfig:
+    return RunConfig(
+        model=options.model,
+        backend=options.backend,
+        model_path=str(candidate.path) if candidate else None,
+        model_id=candidate.id if candidate else None,
+        model_source_root=str(candidate.source_root) if candidate else None,
+        prompt=options.prompt,
+        negative_prompt=options.negative_prompt,
+        seed=options.seed,
+        width=spec.run.width,
+        height=spec.run.height,
+        frames=spec.run.frames,
+        fps=options.fps,
+        steps=spec.run.steps,
+        guidance=spec.run.guidance,
+        quant=spec.run.quant,
+        cache=spec.run.cache,
+        compile=spec.run.compile,
+        output_dir=options.output_dir,
+        result_jsonl=options.result_jsonl,
+        save_video=spec.run.save_video,
+        dry_run=options.dry_run,
+        profile_id=profile_id,
+        profile_name=profile_name,
+        preset=spec.preset,
+        variant_label=spec.variant_label,
+    )
+
+
+def _skipped_profile_records(
+    *,
+    options: RunOptions,
+    profile_id: str,
+    profile_name: str,
+    spec: ProfileRunSpec,
+    reason: str,
+) -> list:
+    return _profile_error_records(
+        options=options,
+        profile_id=profile_id,
+        profile_name=profile_name,
+        spec=spec,
+        error=reason,
+    )
+
+
+def _profile_error_records(
+    *,
+    options: RunOptions,
+    profile_id: str,
+    profile_name: str,
+    spec: ProfileRunSpec,
+    error: str,
+) -> list:
+    config = _profile_run_config(
+        options=options,
+        candidate=None,
+        profile_id=profile_id,
+        profile_name=profile_name,
+        spec=spec,
+    )
+    return [
+        make_record(
+            config,
+            run_id=new_run_id(),
+            timestamp_utc=utc_timestamp(),
+            machine=machine_metadata(),
+            phase="total",
+            seconds=0.0,
+            error=error,
+        )
+    ]
+
+
+def _default_profile_jsonl(*, results_dir: Path, model: str) -> Path:
+    locale = _safe_locale_name()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_model = _safe_filename_part(model)
+    return results_dir / f"{timestamp}T{locale}_{safe_model}.jsonl"
+
+
+def _safe_locale_name() -> str:
+    local_zone = time.tzname[0] if time.tzname else "local"
+    if time.daylight and len(time.tzname) > 1:
+        local_zone = time.tzname[1]
+    return _safe_filename_part(local_zone or "local")
+
+
+def _safe_filename_part(value: str) -> str:
+    safe = "".join(character if character.isalnum() or character in {".", "-", "_"} else "-" for character in value)
+    return safe.strip("-") or "unknown"
+
+
+def _print_profile_summary(records: list[dict], jsonl_path: Path, report_path: Path) -> None:
+    rows = _profile_summary_rows(records)
+    typer.echo("Profile suite summary:")
+    typer.echo("preset | variant | total_s | slowest_phase | denoise_avg_s | peak_memory | status")
+    typer.echo("--- | --- | ---: | --- | ---: | --- | ---")
+    for row in rows:
+        typer.echo(
+            f"{row['preset']} | {row['variant']} | {row['total']:.6f} | "
+            f"{row['slowest_phase']} | {row['denoise_avg']:.6f} | "
+            f"{row['peak_memory']} | {row['status']}"
+        )
+    typer.echo(f"Recommended next bottleneck: {_profile_recommendation(records)}")
+    typer.echo(f"JSONL: {jsonl_path}")
+    typer.echo(f"Report: {report_path}")
+
+
+def _profile_summary_rows(records: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for record in records:
+        grouped.setdefault(str(record["run_id"]), []).append(record)
+    rows = []
+    for run_records in grouped.values():
+        first = run_records[0]
+        errors = [str(record["error"]) for record in run_records if record.get("error")]
+        status = "skipped" if any(error.startswith("skipped:") for error in errors) else ("failed" if errors else "ok")
+        rows.append(
+            {
+                "preset": first.get("preset") or "manual",
+                "variant": first.get("variant_label") or "manual",
+                "total": _sum_phase(run_records, "total"),
+                "slowest_phase": _slowest_recorded_phase(run_records)[0],
+                "denoise_avg": _average_phase(run_records, "denoise_step"),
+                "peak_memory": _format_summary_memory(_max_memory(run_records)),
+                "status": status,
+            }
+        )
+    return rows
+
+
+def _profile_recommendation(records: list[dict]) -> str:
+    errors = [str(record["error"]) for record in records if record.get("error") and not str(record["error"]).startswith("skipped:")]
+    if errors:
+        return f"fix failed run first: {errors[0]}"
+    phase_totals: dict[str, float] = {}
+    total = 0.0
+    for record in records:
+        phase = str(record["phase"])
+        seconds = float(record["seconds"])
+        if phase == "total":
+            total += seconds
+        elif phase != "denoise_step":
+            phase_totals[phase] = phase_totals.get(phase, 0.0) + seconds
+    if not phase_totals:
+        return "no phase timing data available"
+    phase, seconds = max(phase_totals.items(), key=lambda item: item[1])
+    if phase == "denoise_total" and total > 0:
+        return f"inspect denoise_total first ({seconds / total * 100.0:.1f}% of total time)"
+    return f"inspect {phase} first ({seconds:.6f}s cumulative)"
+
+
+def _sum_phase(records: list[dict], phase: str) -> float:
+    return sum(float(record["seconds"]) for record in records if record["phase"] == phase)
+
+
+def _average_phase(records: list[dict], phase: str) -> float:
+    values = [float(record["seconds"]) for record in records if record["phase"] == phase]
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _slowest_recorded_phase(records: list[dict]) -> tuple[str, float]:
+    phases: dict[str, float] = {}
+    for record in records:
+        phase = str(record["phase"])
+        if phase in {"total", "denoise_step"}:
+            continue
+        phases[phase] = phases.get(phase, 0.0) + float(record["seconds"])
+    if not phases:
+        return ("none", 0.0)
+    return max(phases.items(), key=lambda item: item[1])
+
+
+def _max_memory(records: list[dict]) -> int | None:
+    values = [int(record["peak_memory"]) for record in records if record.get("peak_memory") is not None]
+    return max(values) if values else None
+
+
+def _format_summary_memory(value: int | None) -> str:
+    return "unavailable" if value is None else str(value)
+
+
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
     if options.model_path is not None:
         return direct_model_candidate(options.model_path, model=options.model)
@@ -570,13 +1164,25 @@ def _import_model_dirs(
         typer.echo("No known model directories found.")
         return 1
 
-    typer.echo("Discovered model directories:")
+    typer.echo("Discovered app roots:")
     for path in found:
         typer.echo(f"- {path}")
-    if source in {"ollama", "all"} and any(".ollama" in str(path) for path in found):
-        typer.echo("Note: Ollama directories are registered for discovery only; direct Ollama blob loading is not implemented.")
 
-    replacement_preview = [path.expanduser().resolve() for path in found]
+    generation_dirs = discover_generation_model_dirs(found)
+    if not generation_dirs:
+        typer.echo("No Wan2.2/LTX2.3 generation model candidates found under discovered app roots.")
+        return 1
+
+    typer.echo("Generation model directories to register:")
+    for path in generation_dirs:
+        typer.echo(f"- {path}")
+    for path in found:
+        if not any(_is_relative_to(candidate, path) for candidate in generation_dirs):
+            typer.echo(f"Skipped {path}: no Wan2.2/LTX2.3 generation model candidates found under this root.")
+    if source in {"ollama", "lmstudio", "all"}:
+        typer.echo("Note: LM Studio/Ollama LLM-only and GGUF-only directories are not registered for this video generation profiler.")
+
+    replacement_preview = [path.expanduser().resolve() for path in generation_dirs]
     typer.echo(f"FASTGEN_MODEL_DIRS={':'.join(str(path) for path in replacement_preview)}")
     if dry_run:
         typer.echo("Dry run: .env was not modified.")
@@ -587,9 +1193,17 @@ def _import_model_dirs(
             typer.echo("Import cancelled.")
             return 0
 
-    replacement = replace_model_dirs_in_env(env_file, found)
+    replacement = replace_model_dirs_in_env(env_file, generation_dirs)
     typer.echo(f"Updated {env_file}: {len(replacement)} model directories registered.")
     return 0
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _validate_choice(value: str | None, choices: tuple[str, ...], name: str) -> str:
@@ -605,6 +1219,41 @@ def _validate_optional_choice(value: str | None, choices: tuple[str, ...], name:
     if value is None:
         return None
     return _validate_choice(value, choices, name)
+
+
+def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
+    typer.echo(f"{label}:")
+    for index, choice in enumerate(choices, start=1):
+        suffix = " (default)" if choice == default else ""
+        typer.echo(f"{index}. {choice}{suffix}")
+    while True:
+        raw = input(f"{label} [{default}]: ").strip()
+        if not raw:
+            return default
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(choices):
+                return choices[index - 1]
+        normalized = raw.lower()
+        if normalized in choices:
+            return normalized
+        typer.echo("Invalid selection.")
+
+
+def _prompt_text(label: str, default: str) -> str:
+    raw = input(f"{label} [{default}]: ").strip()
+    return raw or default
+
+
+def _prompt_int(label: str, default: int) -> int:
+    while True:
+        raw = input(f"{label} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            typer.echo("Enter an integer.")
 
 
 if __name__ == "__main__":

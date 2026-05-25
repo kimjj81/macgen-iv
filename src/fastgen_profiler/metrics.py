@@ -52,6 +52,10 @@ class RunConfig:
     result_jsonl: Path
     save_video: bool
     dry_run: bool
+    profile_id: str | None = None
+    profile_name: str | None = None
+    preset: str | None = None
+    variant_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -83,6 +87,10 @@ class MeasurementRecord:
     cache_memory: int | None
     output_path: str | None
     error: str | None
+    profile_id: str | None
+    profile_name: str | None
+    preset: str | None
+    variant_label: str | None
     machine: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,6 +167,10 @@ def make_record(
         cache_memory=cache_memory,
         output_path=output_path,
         error=error,
+        profile_id=config.profile_id,
+        profile_name=config.profile_name,
+        preset=config.preset,
+        variant_label=config.variant_label,
         machine=machine,
     )
 

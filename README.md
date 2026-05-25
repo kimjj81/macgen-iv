@@ -37,6 +37,8 @@ See `docs/architecture.md` for the layer model and `docs/profiling.md` for the t
 ```bash
 uv sync --extra dev
 uv run fastgen-profile
+uv run fastgen-profile run
+uv run fastgen-profile models
 ```
 
 Use `uv run` when the virtual environment is not activated:
@@ -53,6 +55,18 @@ uv run fastgen-profile run \
 uv run fastgen-profile report --input artifacts/results.jsonl --output artifacts/report.md
 ```
 
+Run the full preset suite for one model and generate comparison output:
+
+```bash
+uv run fastgen-profile profile \
+  --model wan2.2 \
+  --backend stub \
+  --prompt "a cinematic mountain flythrough" \
+  --seed 7
+```
+
+By default this writes `artifacts/profiles/YYYYMMDD_HHmmSST{locale}_wan2.2.jsonl` and a matching Markdown report beside it. The console summary and report compare preset variants by total time, phase breakdown, average denoise step time, peak memory, skipped/failed runs, and the recommended next bottleneck to inspect.
+
 Or activate the virtual environment first:
 
 ```bash
@@ -66,6 +80,7 @@ fastgen-profile
 uv sync --extra dev
 uv run pytest
 uv run fastgen-profile --help
+uv run fastgen-profile profile --help
 ```
 
 To include optional MLX dependencies:
@@ -75,6 +90,7 @@ uv sync --extra dev --extra mlx
 ```
 
 Running `fastgen-profile` without arguments in an interactive terminal opens a menu for common tasks, including importing local model directories into `.env`.
+`fastgen-profile run` and `fastgen-profile models` also open interactive prompts when required values are omitted in a terminal.
 
 Available run presets:
 
@@ -100,10 +116,12 @@ FASTGEN_MODEL_DIR_LTX23=/Volumes/models/ltx
 List discovered candidates:
 
 ```bash
-uv run fastgen-profile models list --model wan2.2 --model-dir /path/to/models
+uv run fastgen-profile models list --model-dir /path/to/models
 ```
 
-Import known local model roots into `.env`:
+`models list` prints all discovered Wan2.2 and LTX2.3 generation model candidates by default. Pass `--model wan2.2` or `--model ltx2.3` only when you want to filter the list.
+
+Import known local model roots, scan them for Wan2.2/LTX2.3 generation model directories, and write only those model directories into `.env`:
 
 ```bash
 uv run fastgen-profile models import --source all
@@ -111,7 +129,8 @@ uv run fastgen-profile models import --source huggingface --dry-run
 ```
 
 Supported import sources are `drawthings`, `comfyui`, `huggingface`, `lmstudio`, `ollama`, and `all`. Importing registers directories only; it does not copy, move, convert, or download model files.
-Import replaces the existing `FASTGEN_MODEL_DIRS` value with the directories found in the current scan. If no known directories are found, the command exits with an error and does not change `.env`.
+Import replaces the existing `FASTGEN_MODEL_DIRS` value with Wan2.2/LTX2.3 generation model candidate directories found in the current scan. LM Studio/Ollama LLM-only and GGUF-only directories are skipped. If no generation model candidates are found, the command exits with an error and does not change `.env`.
+Draw Things discovery checks both `~/Library/Containers/Draw Things/Data` and `~/Library/Containers/com.liuliu.draw-things/Data`, including their `Documents/Models` subdirectories.
 
 Use a specific model:
 

@@ -10,6 +10,7 @@ from typing import Iterable
 
 MODEL_MARKER_FILES = ("model_index.json", "config.json")
 MODEL_MARKER_SUFFIXES = (".safetensors", ".ckpt", ".gguf", ".mlx")
+TARGET_GENERATION_MODELS = ("wan2.2", "ltx2.3")
 IMPORT_SOURCES = ("drawthings", "comfyui", "huggingface", "lmstudio", "ollama", "all")
 SKIP_DIR_NAMES = {
     ".cache",
@@ -21,7 +22,10 @@ SKIP_DIR_NAMES = {
 
 DEFAULT_IMPORT_PATHS = {
     "drawthings": (
+        "~/Library/Containers/Draw Things/Data/Documents/Models",
+        "~/Library/Containers/Draw Things/Data",
         "~/Library/Containers/com.liuliu.draw-things/Data/Documents/Models",
+        "~/Library/Containers/com.liuliu.draw-things/Data",
         "~/Documents/Draw Things/Models",
     ),
     "comfyui": (
@@ -96,6 +100,13 @@ def discover_import_dirs(source: str) -> list[Path]:
     return _dedupe_paths(found)
 
 
+def discover_generation_model_dirs(roots: Iterable[Path]) -> list[Path]:
+    candidates: list[ModelCandidate] = []
+    for model in TARGET_GENERATION_MODELS:
+        candidates.extend(discover_models(roots, model=model))
+    return _dedupe_paths(candidate.path for candidate in candidates)
+
+
 def merge_model_dirs_into_env(env_file: Path, new_dirs: Iterable[Path]) -> list[Path]:
     env_values = load_env_file(env_file)
     merged = _dedupe_paths(
@@ -135,7 +146,9 @@ def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[
                 model_family_guess=guess_model_family(path),
                 markers=markers,
             )
-            if model is None or candidate.model_family_guess in {model, "unknown"}:
+            if model is None:
+                candidates.append(candidate)
+            elif _is_generation_model_candidate(candidate, model=model):
                 candidates.append(candidate)
     return sorted(candidates, key=lambda item: (item.model_family_guess == "unknown", item.id))
 
@@ -225,6 +238,16 @@ def _markers(path: Path) -> tuple[str, ...]:
         if child.is_file() and child.suffix.lower() in MODEL_MARKER_SUFFIXES:
             markers.append(f"*{child.suffix.lower()}")
     return tuple(sorted(set(markers)))
+
+
+def _is_generation_model_candidate(candidate: ModelCandidate, *, model: str) -> bool:
+    if candidate.model_family_guess != model:
+        return False
+    if set(candidate.markers) == {"*.gguf"}:
+        return False
+    if set(candidate.markers) == {"config.json"} and guess_model_family(Path(candidate.name)) != model:
+        return False
+    return True
 
 
 def _candidate_id(root: Path, path: Path) -> str:

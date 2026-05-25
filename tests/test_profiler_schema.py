@@ -35,6 +35,10 @@ REQUIRED_FIELDS = {
     "cache_memory",
     "output_path",
     "error",
+    "profile_id",
+    "profile_name",
+    "preset",
+    "variant_label",
     "machine",
 }
 

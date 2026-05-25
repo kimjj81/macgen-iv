@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from fastgen_profiler.models import (
+    discover_generation_model_dirs,
     discover_import_dirs,
     discover_models,
     merge_model_dirs_into_env,
@@ -28,6 +29,42 @@ def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):
     assert any("*.safetensors" in candidate.markers for candidate in ltx_candidates)
 
 
+def test_model_specific_discovery_excludes_unknown_and_gguf_only_candidates(tmp_path):
+    wan_model = tmp_path / "wan2.2-video"
+    unknown_model = tmp_path / "random-video-model"
+    gguf_model = tmp_path / "wan2.2-llm"
+    subcomponent = tmp_path / "models--owner--wan2.2" / "snapshots" / "abc" / "audio_vae"
+    wan_model.mkdir()
+    unknown_model.mkdir()
+    gguf_model.mkdir()
+    subcomponent.mkdir(parents=True)
+    (wan_model / "config.json").write_text("{}", encoding="utf-8")
+    (unknown_model / "config.json").write_text("{}", encoding="utf-8")
+    (gguf_model / "model.gguf").write_text("", encoding="utf-8")
+    (subcomponent / "config.json").write_text("{}", encoding="utf-8")
+
+    wan_candidates = discover_models([tmp_path], model="wan2.2")
+
+    assert [candidate.name for candidate in wan_candidates] == ["wan2.2-video"]
+
+
+def test_generation_model_dirs_returns_leaf_wan_ltx_directories(tmp_path):
+    root = tmp_path / "ComfyUI/models"
+    wan_model = root / "diffusion_models" / "wan2.2-video"
+    ltx_model = root / "checkpoints" / "ltx2.3-video"
+    llm_model = root / "llm" / "wan2.2-chat"
+    wan_model.mkdir(parents=True)
+    ltx_model.mkdir(parents=True)
+    llm_model.mkdir(parents=True)
+    (wan_model / "model.safetensors").write_text("", encoding="utf-8")
+    (ltx_model / "model.ckpt").write_text("", encoding="utf-8")
+    (llm_model / "model.gguf").write_text("", encoding="utf-8")
+
+    dirs = discover_generation_model_dirs([root])
+
+    assert dirs == [wan_model.resolve(), ltx_model.resolve()]
+
+
 def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
     env_dir = tmp_path / "env-models"
     family_dir = tmp_path / "wan-models"
@@ -50,7 +87,10 @@ def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
 def test_discovers_default_import_dirs_for_supported_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     expected = [
+        tmp_path / "Library/Containers/Draw Things/Data/Documents/Models",
+        tmp_path / "Library/Containers/Draw Things/Data",
         tmp_path / "Library/Containers/com.liuliu.draw-things/Data/Documents/Models",
+        tmp_path / "Library/Containers/com.liuliu.draw-things/Data",
         tmp_path / "Documents/Draw Things/Models",
         tmp_path / "ComfyUI/models",
         tmp_path / "Documents/ComfyUI/models",
@@ -60,11 +100,25 @@ def test_discovers_default_import_dirs_for_supported_sources(tmp_path, monkeypat
         tmp_path / ".ollama/models",
     ]
     for path in expected:
-        path.mkdir(parents=True)
+        path.mkdir(parents=True, exist_ok=True)
 
     found = discover_import_dirs("all")
 
     assert found == [path.resolve() for path in expected]
+
+
+def test_draw_things_container_data_root_can_import_nested_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    data_root = tmp_path / "Library/Containers/Draw Things/Data"
+    model_dir = data_root / "Documents/Models/wan2.2-drawthings"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.safetensors").write_text("", encoding="utf-8")
+
+    roots = discover_import_dirs("drawthings")
+    generation_dirs = discover_generation_model_dirs(roots)
+
+    assert data_root.resolve() in roots
+    assert model_dir.resolve() in generation_dirs
 
 
 def test_merge_model_dirs_into_env_preserves_existing_content_and_dedupes(tmp_path):

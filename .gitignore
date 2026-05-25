@@ -32,6 +32,8 @@ dist/
 artifacts/
 benchmarks/
 reports/
+!src/fastgen_profiler/reports/
+!src/fastgen_profiler/reports/*.py
 *.jsonl
 
 # Generated media and model artifacts
