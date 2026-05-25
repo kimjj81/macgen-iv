@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Benchmark and profiler outputs
+artifacts/
+benchmarks/
+reports/
+*.jsonl
+
+# Generated media and model artifacts
+outputs/
+samples/
+checkpoints/
+models/
+weights/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# MLX/local caches
+.mlx/
+mlx_cache/
