@@ -81,7 +81,8 @@ records in host memory.
 JSONL record serialization must also bound string fields, including nested
 guard context, so large exception messages or local paths cannot create
 unbounded result records. Nested metadata collections must also cap item counts
-before JSONL serialization.
+before JSONL serialization. These bounds must be applied before recursive
+deep-copying of metadata.
 Report and CLI summary rendering must avoid propagating non-finite timings or
 unbounded text fields from malformed records into generated output.
 User-selected configuration files such as `--env-file` must also be capped

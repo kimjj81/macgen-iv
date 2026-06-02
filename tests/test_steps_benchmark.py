@@ -348,6 +348,52 @@ def test_steps_benchmark_child_guard_block_marks_guard_blocked(tmp_path, monkeyp
     ]
 
 
+def test_steps_benchmark_child_result_bounds_text_and_collections(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_child_result_bounds_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    result_path = tmp_path / "steps" / "child.json"
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_RESULT", str(result_path))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_STEP", "1")
+    spec.loader.exec_module(module)
+
+    long_error = "blocked:" + ("x" * (module.STEPS_RESULT_TEXT_FIELD_MAX_CHARS * 2))
+    cleanup = {
+        "detail": long_error,
+        "events": list(range(module.STEPS_RESULT_COLLECTION_MAX_ITEMS + 20)),
+        "nested": {
+            f"item-{index}": long_error
+            for index in range(module.STEPS_RESULT_COLLECTION_MAX_ITEMS + 20)
+        },
+    }
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(module.RuntimeMemoryAbort(long_error)),
+    )
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: cleanup)
+
+    assert module.run_child() == 0
+
+    records = [
+        json.loads(line)
+        for line in result_path.read_text(encoding="utf-8").splitlines()
+    ]
+    record = records[0]
+    assert "<truncated>" in record["error"]
+    assert len(record["error"]) <= module.STEPS_RESULT_TEXT_FIELD_MAX_CHARS
+    assert "<truncated>" in record["cleanup"]["detail"]
+    assert len(record["cleanup"]["events"]) == module.STEPS_RESULT_COLLECTION_MAX_ITEMS + 1
+    assert record["cleanup"]["events"][-1] == {"__truncated_items__": True}
+    assert len(record["cleanup"]["nested"]) == module.STEPS_RESULT_COLLECTION_MAX_ITEMS + 1
+    assert record["cleanup"]["nested"]["__truncated_items__"] is True
+
+
 def test_steps_benchmark_child_rejects_invalid_step_env(tmp_path, monkeypatch):
     import importlib.util
 

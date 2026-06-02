@@ -191,6 +191,51 @@ def test_measurement_record_bounds_serialized_text_fields():
     assert record["machine"]["nested"]["long_dict"]["__truncated_items__"] is True
 
 
+def test_measurement_record_bounds_before_deepcopying_metadata():
+    class DeepcopyBlocked:
+        def __deepcopy__(self, memo):
+            raise AssertionError("metric serialization must not deep-copy metadata before bounding")
+
+        def __repr__(self):
+            return "DeepcopyBlocked(" + ("x" * (MAX_METRIC_TEXT_FIELD_CHARS * 2)) + ")"
+
+    config = RunConfig(
+        model="wan2.2",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=Path("unused"),
+        result_jsonl=Path("unused.jsonl"),
+        save_video=False,
+        dry_run=True,
+    )
+
+    record = make_record(
+        config,
+        run_id="run",
+        timestamp_utc="2026-01-01T00:00:00Z",
+        machine={"object": DeepcopyBlocked()},
+        phase="total",
+        seconds=0.0,
+    ).to_dict()
+
+    assert "<truncated>" in record["machine"]["object"]
+    assert len(record["machine"]["object"]) <= MAX_METRIC_TEXT_FIELD_CHARS
+
+
 def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():
     long_error = "failed: " + ("x" * 1_000)
     records = [

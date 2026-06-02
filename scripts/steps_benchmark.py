@@ -15,6 +15,7 @@ import os
 import subprocess
 import importlib.util
 from pathlib import Path
+from typing import Any, Iterable
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -160,6 +161,8 @@ CHILD_RESULT_MAX_BYTES = _env_capped_positive_int(
     CHILD_IO_MAX_BYTES,
     CHILD_IO_MAX_BYTES,
 )
+STEPS_RESULT_TEXT_FIELD_MAX_CHARS = 2_048
+STEPS_RESULT_COLLECTION_MAX_ITEMS = 256
 
 # Exit code to signal orchestrator that the process should be restarted.
 EXIT_RESTART = 10
@@ -350,7 +353,7 @@ def run_child() -> int:
         result["cleanup"] = mlx_cleanup()
 
     temp_result_path = result_path.with_suffix(result_path.suffix + ".tmp")
-    temp_result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    temp_result_path.write_text(json.dumps(_bound_steps_result(result)) + "\n", encoding="utf-8")
     temp_result_path.replace(result_path)
     return 0
 
@@ -431,7 +434,7 @@ def run_step_in_child(steps: int) -> dict:
                 "aborted": True,
                 "log_path": str(child_log),
             }
-        record = records[-1]
+        record = _bound_steps_result(records[-1])
         record.setdefault("log_path", str(child_log))
         return record
     return {
@@ -457,6 +460,47 @@ def _print_child_log_tail(path: Path) -> None:
     print(data.decode("utf-8", errors="replace"), end="")
 
 
+def _bound_steps_result(value: Any) -> Any:
+    if isinstance(value, str):
+        return _bound_steps_text(value)
+    if isinstance(value, dict):
+        bounded: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= STEPS_RESULT_COLLECTION_MAX_ITEMS:
+                bounded["__truncated_items__"] = True
+                break
+            bounded[_bound_steps_text(str(key))] = _bound_steps_result(item)
+        return bounded
+    if isinstance(value, list):
+        return _bound_steps_sequence(value)
+    if isinstance(value, tuple):
+        return _bound_steps_sequence(value)
+    return value
+
+
+def _bound_steps_text(value: str) -> str:
+    if len(value) <= STEPS_RESULT_TEXT_FIELD_MAX_CHARS:
+        return value
+    suffix = "...<truncated>"
+    return value[: STEPS_RESULT_TEXT_FIELD_MAX_CHARS - len(suffix)] + suffix
+
+
+def _bound_steps_sequence(value: Iterable[Any]) -> list[Any]:
+    bounded = []
+    for index, item in enumerate(value):
+        if index >= STEPS_RESULT_COLLECTION_MAX_ITEMS:
+            bounded.append({"__truncated_items__": True})
+            break
+        bounded.append(_bound_steps_result(item))
+    return bounded
+
+
+def _write_steps_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(_bound_steps_result(record)) + "\n")
+
+
 def parent_inter_child_recovery(label: str) -> dict[str, object]:
     """System-only recovery between child MLX processes.
 
@@ -479,9 +523,10 @@ def main():
             "FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY=1 after reviewing cooldown, "
             "memory reserve, and model paths"
         )
-        with open(RESULTS_JSONL, "w") as f:
-            for steps in STEP_VALUES:
-                f.write(json.dumps({"steps": steps, "error": error, "skipped": True}) + "\n")
+        _write_steps_jsonl(
+            RESULTS_JSONL,
+            ({"steps": steps, "error": error, "skipped": True} for steps in STEP_VALUES),
+        )
         print(f"  [guard] {error}")
         print(f"Results: {RESULTS_JSONL}")
         return 1
@@ -529,9 +574,7 @@ def main():
             print(f"  [guard] Process has run {run_counter()} times. "
                   f"Recommending restart to prevent Metal resource leak.")
             # Save what we have so far
-            with open(RESULTS_JSONL, "w") as f:
-                for r in all_results:
-                    f.write(json.dumps(r) + "\n")
+            _write_steps_jsonl(RESULTS_JSONL, all_results)
             print(f"  [guard] Partial results saved to {RESULTS_JSONL}")
             print(f"  [guard] Remaining steps: {[s for s in STEP_VALUES if not any(r.get('steps') == s and 'error' not in r for r in all_results)]}")
             sys.exit(EXIT_RESTART)
@@ -572,9 +615,7 @@ def main():
             mlx_cleanup()
 
     # Write JSONL
-    with open(RESULTS_JSONL, "w") as f:
-        for r in all_results:
-            f.write(json.dumps(r) + "\n")
+    _write_steps_jsonl(RESULTS_JSONL, all_results)
 
     print(f"\n\n{'='*60}")
     print("BENCHMARK COMPLETE")

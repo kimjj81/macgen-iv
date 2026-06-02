@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 import hashlib
 from importlib import metadata
@@ -99,7 +99,12 @@ class MeasurementRecord:
     machine: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return _bound_metric_value(asdict(self))
+        # Avoid dataclasses.asdict(): it recursively deep-copies nested machine
+        # metadata before we can enforce JSONL bounds.
+        return {
+            record_field.name: _bound_metric_value(getattr(self, record_field.name))
+            for record_field in fields(self)
+        }
 
 
 def new_run_id() -> str:
@@ -202,7 +207,9 @@ def _bound_metric_value(value: Any) -> Any:
         return _bound_metric_sequence(value)
     if isinstance(value, tuple):
         return _bound_metric_sequence(value)
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _bound_metric_text(repr(value))
 
 
 def _bound_metric_text(value: str) -> str:
