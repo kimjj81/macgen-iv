@@ -378,6 +378,26 @@ def _records_have_errors(records: list[MeasurementRecord]) -> bool:
     return any(record.error for record in records)
 
 
+def _bounded_profile_records(
+    records: object,
+    *,
+    current_count: int,
+) -> tuple[list[MeasurementRecord], str | None]:
+    limit_error = _profile_record_limit_error(records, current_count=current_count)
+    if limit_error is not None:
+        return [], limit_error
+    if isinstance(records, list):
+        return records, None
+
+    remaining = MAX_REPORT_RECORDS - current_count
+    bounded: list[MeasurementRecord] = []
+    for index, record in enumerate(records):  # type: ignore[operator]
+        if index >= remaining:
+            return [], _profile_record_limit_message(current_count + index + 1)
+        bounded.append(record)
+    return bounded, None
+
+
 def _profile_record_limit_error(records: object, *, current_count: int) -> str | None:
     try:
         record_count = len(records)  # type: ignore[arg-type]
@@ -386,6 +406,10 @@ def _profile_record_limit_error(records: object, *, current_count: int) -> str |
     total_count = current_count + record_count
     if total_count <= MAX_REPORT_RECORDS:
         return None
+    return _profile_record_limit_message(total_count)
+
+
+def _profile_record_limit_message(total_count: int) -> str:
     return (
         f"profile record limit exceeded: {total_count} records > {MAX_REPORT_RECORDS}; "
         "refusing to materialize profile report"
@@ -738,7 +762,7 @@ def profile_command(options: RunOptions) -> int:
                 guard_context=cleanup_status,
             )
 
-        limit_error = _profile_record_limit_error(records, current_count=len(all_records))
+        records, limit_error = _bounded_profile_records(records, current_count=len(all_records))
         if limit_error is not None:
             memory_guard_failed = True
             records = _profile_error_records(
