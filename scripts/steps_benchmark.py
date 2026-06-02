@@ -114,6 +114,7 @@ def _capped_positive_int_value(name: str, raw: str, max_value: int) -> int:
 
 
 def _eval_mlx(mx, target, *, label: str) -> None:
+    abort = None
     try:
         mx.eval(target)
     except Exception as exc:
@@ -121,10 +122,12 @@ def _eval_mlx(mx, target, *, label: str) -> None:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise _runtime_memory_abort_after_cleanup(
+        abort = _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label}]: MLX eval failed; "
             "aborting because Metal runtime state may be unsafe."
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
 
 
 MODEL_PATH = Path(os.environ.get(
@@ -404,7 +407,23 @@ def _cleanup_after_exception(exc: BaseException) -> dict[str, object]:
         setattr(exc, _CLEANUP_DONE_ATTR, True)
     except Exception:
         pass
+    _detach_exception(exc)
     return cleanup
+
+
+def _detach_exception(exc: BaseException) -> None:
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
 
 
 def _runtime_memory_abort_after_cleanup(message: str) -> RuntimeMemoryAbort:
@@ -474,6 +493,7 @@ def _video_frame_budget_bytes(video: Any, *, multiplier: int) -> int:
 
 
 def _video_pixel_stat_int(video: Any, metric: str, *, label: str) -> int:
+    abort = None
     try:
         return int(getattr(video, metric)())
     except Exception as exc:
@@ -481,13 +501,15 @@ def _video_pixel_stat_int(video: Any, metric: str, *, label: str) -> int:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise _runtime_memory_abort_after_cleanup(
+        abort = _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
-        ) from exc
+        )
+    raise abort
 
 
 def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
+    abort = None
     try:
         return float(getattr(video, metric)())
     except Exception as exc:
@@ -495,14 +517,16 @@ def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise _runtime_memory_abort_after_cleanup(
+        abort = _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
-        ) from exc
+        )
+    raise abort
 
 
 def _save_png_frame(image_module: Any, video: Any, index: int, *, step_dir: Path, label: str) -> Any:
     image = None
+    abort = None
     try:
         image = image_module.fromarray(video[index])
         image.save(str(step_dir / f"frame_{index:03d}.png"))
@@ -513,10 +537,11 @@ def _save_png_frame(image_module: Any, video: Any, index: int, *, step_dir: Path
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise _runtime_memory_abort_after_cleanup(
+        abort = _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} png frame {index}]: PNG frame save failed; "
             "aborting because host materialization state may be unsafe."
-        ) from exc
+        )
+    raise abort
 
 
 def run_child() -> int:

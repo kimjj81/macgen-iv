@@ -1191,10 +1191,12 @@ def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeyp
     monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
     monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
 
-    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed"):
+    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed") as caught:
         module.run_single(1)
 
     assert cleanup_calls == ["cleanup"]
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_steps_benchmark_eval_failure_clears_cause_traceback_before_cleanup(tmp_path, monkeypatch):
@@ -1231,10 +1233,12 @@ def test_steps_benchmark_eval_failure_clears_cause_traceback_before_cleanup(tmp_
 
     monkeypatch.setattr(module, "mlx_cleanup", cleanup)
 
-    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed"):
+    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed") as caught:
         module._eval_mlx(FakeMx(), object(), label="eval cause")
 
     assert cleanup_calls == ["cleanup"]
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_steps_benchmark_child_cleanup_clears_traceback_locals_before_mlx_cleanup(tmp_path, monkeypatch):
