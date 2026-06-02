@@ -347,6 +347,9 @@ def run_single(steps: int):
         cleanup = mlx_cleanup()
         print(f"  [guard] cleanup: freed={cleanup.get('freed_gb', '?')}GB "
               f"now_free={cleanup.get('free_after_gb', '?')}GB")
+        cleanup_abort = _post_run_cleanup_abort(cleanup, label=label)
+        if cleanup_abort is not None:
+            raise cleanup_abort
         increment_run_counter()
     except Exception as exc:
         _clear_exception_traceback_frames(exc)
@@ -433,6 +436,26 @@ def _runtime_memory_abort_after_cleanup(message: str) -> RuntimeMemoryAbort:
     except Exception:
         pass
     return abort
+
+
+def _post_run_cleanup_abort(cleanup: object, *, label: str) -> RuntimeMemoryAbort | None:
+    if not isinstance(cleanup, dict):
+        return _runtime_memory_abort_after_cleanup(
+            f"Runtime memory abort [{label} cleanup]: MLX cleanup returned invalid status; "
+            "aborting because Metal runtime state may still be retained."
+        )
+    cleanup_error = cleanup.get("mlx_cleanup_error")
+    if cleanup_error:
+        return _runtime_memory_abort_after_cleanup(
+            f"Runtime memory abort [{label} cleanup]: MLX cleanup failed: {cleanup_error}; "
+            "aborting because Metal runtime state may still be retained."
+        )
+    if cleanup.get("mlx_loaded") is True and cleanup.get("mlx_cache_cleared") is False:
+        return _runtime_memory_abort_after_cleanup(
+            f"Runtime memory abort [{label} cleanup]: MLX cache was not cleared after a completed run; "
+            "aborting because Metal runtime state may still be retained."
+        )
+    return None
 
 
 def _check_decoded_video_shape(video, *, label: str) -> None:
