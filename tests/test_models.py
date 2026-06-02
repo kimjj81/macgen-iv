@@ -184,6 +184,19 @@ def test_generation_model_dirs_returns_leaf_wan_ltx_directories(tmp_path):
     assert dirs == [wan_model.resolve(), ltx_model.resolve()]
 
 
+def test_generation_model_dirs_registers_parent_for_flat_draw_things_files(tmp_path):
+    root = tmp_path / "Draw Things" / "Models"
+    root.mkdir(parents=True)
+    wan_file = root / "wan_v2.2_5b_ti2v_q8p.ckpt"
+    ltx_file = root / "ltx_2.3_22b_distilled_1.1_q6p.ckpt"
+    wan_file.write_text("", encoding="utf-8")
+    ltx_file.write_text("", encoding="utf-8")
+
+    dirs = discover_generation_model_dirs([root])
+
+    assert dirs == [root.resolve()]
+
+
 def test_generation_model_dirs_enforces_global_candidate_limit(tmp_path):
     root = tmp_path / "models"
     wan_model = root / "wan2.2-video"

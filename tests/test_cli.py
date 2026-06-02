@@ -2399,6 +2399,10 @@ def test_models_import_dry_run_discovers_dirs_without_writing_env(tmp_path, monk
     hf_model = hf_dir / "models--owner--wan2.2" / "snapshots" / "abc123"
     hf_model.mkdir(parents=True)
     (hf_model / "model_index.json").write_text("{}", encoding="utf-8")
+    drawthings_dir = tmp_path / "Library/Containers/com.liuliu.draw-things/Data/Documents/Models"
+    drawthings_dir.mkdir(parents=True)
+    drawthings_model = drawthings_dir / "ltx_2.3_22b_distilled_1.1_q6p.ckpt"
+    drawthings_model.write_text("", encoding="utf-8")
     env_file = tmp_path / ".env"
 
     exit_code = main(
@@ -2419,6 +2423,8 @@ def test_models_import_dry_run_discovers_dirs_without_writing_env(tmp_path, monk
     assert "Generation model directories to register" in output
     assert str(hf_dir.resolve()) in output
     assert str(hf_model.resolve()) in output
+    assert str(drawthings_dir.resolve()) in output
+    assert str(drawthings_model.resolve()) not in output
     assert "Dry run" in output
     assert not env_file.exists()
 

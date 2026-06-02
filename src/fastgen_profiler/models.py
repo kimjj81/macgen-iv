@@ -153,7 +153,13 @@ def discover_generation_model_dirs(
             )
         )
         _check_candidate_limit(candidates, max_candidates=max_candidates)
-    return _dedupe_paths(candidate.path for candidate in candidates)
+    return _dedupe_paths(_generation_model_dir(candidate) for candidate in candidates)
+
+
+def _generation_model_dir(candidate: ModelCandidate) -> Path:
+    if candidate.path.suffix.lower() in MODEL_MARKER_SUFFIXES:
+        return candidate.path.parent
+    return candidate.path
 
 
 def merge_model_dirs_into_env(
