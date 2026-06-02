@@ -1844,8 +1844,10 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
         pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
-        pipe._check_host_allocation = lambda required_bytes, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            RuntimeMemoryAbort(f"{phase} too large")
+        pipe._check_host_allocation = lambda required_bytes, phase: (  # type: ignore[method-assign]
+            None
+            if phase == "preflight transformer config"
+            else (_ for _ in ()).throw(RuntimeMemoryAbort(f"{phase} too large"))
         )
         monkeypatch.setattr(
             "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
@@ -1854,6 +1856,36 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
             with pytest.raises(RuntimeMemoryAbort, match="config latent tensor too large"):
+                pipe.load_model()
+
+        limits.assert_not_called()
+
+    def test_ltx23_transformer_config_file_size_preflight_runs_before_json_read(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        transformer_dir = tmp_path / "transformer"
+        transformer_dir.mkdir()
+        (transformer_dir / "config.json").write_text("{not-json}", encoding="utf-8")
+        (transformer_dir / "model.safetensors").write_bytes(b"x")
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_file_load = lambda path, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeMemoryAbort(f"{phase} too large")
+        )
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="preflight transformer config too large"):
                 pipe.load_model()
 
         limits.assert_not_called()
@@ -3887,6 +3919,40 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         monkeypatch.setattr(builtins, "__import__", guarded_import)
 
         with pytest.raises(RuntimeMemoryAbort, match="hidden_size=1000000000 exceeds safe structural dimension"):
+            pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 4096)
+
+    def test_ltx23_text_encoder_config_file_size_preflight_runs_before_json_read(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        text_encoder_dir.mkdir()
+        tokenizer_dir.mkdir()
+        (text_encoder_dir / "config.json").write_text("{not-json}", encoding="utf-8")
+        (text_encoder_dir / "model.safetensors").write_bytes(b"x")
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_file_load = lambda path, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeMemoryAbort(f"{phase} too large")
+        )
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"mlx", "mlx.core", "mlx_lm.models.gemma3_text"}:
+                raise AssertionError("text config file preflight must run before MLX/Gemma imports")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(RuntimeMemoryAbort, match="read text_encoder config too large"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 4096)
 
     def test_wan22_tokenizer_preflight_blocks_before_mlx_limits(self, tmp_path):
