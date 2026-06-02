@@ -239,6 +239,25 @@ class LTX23MLXPipeline:
             )
         return expected
 
+    def _expected_context_shape(self) -> tuple[int, int]:
+        hidden_size = 4096
+        if self.config is not None:
+            hidden_size = _positive_structural_int(
+                getattr(self.config, "cross_attention_dim", getattr(self.config, "caption_channels", 4096)),
+                "cross_attention_dim",
+            )
+        return (1, hidden_size)
+
+    def _validate_context_shape(self, context: Any, phase: str) -> tuple[int, int]:
+        expected = self._expected_context_shape()
+        actual = _bounded_shape_tuple(context, expected_rank=len(expected), label=f"LTX2.3 context {phase}")
+        if actual != expected:
+            raise RuntimeError(
+                f"LTX2.3 context shape {actual} for {phase} does not match expected {expected}; "
+                "refusing to run transformer with unexpected text conditioning memory"
+            )
+        return expected
+
     def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
         if not isinstance(steps, int) or isinstance(steps, bool):
             _raise_runtime_abort(
@@ -829,8 +848,11 @@ class LTX23MLXPipeline:
         if self.model is None or self.config is None:
             raise RuntimeError("denoise_step called before load_model")
         self._validate_denoise_step_args(step_index=step_index, steps=steps)
+        if self.context_emb is None:
+            raise RuntimeError("denoise_step called before encode_text")
         phase = f"denoise {step_index + 1}/{steps}"
         latent_shape = self._validate_latents_shape(latents, phase)
+        context_shape = self._validate_context_shape(self.context_emb, phase)
 
         self._check_memory(f"{phase} before")
         self._ensure_mlx_runtime_ready("denoise")
@@ -845,10 +867,12 @@ class LTX23MLXPipeline:
             latent_elements = b * c * f * h * w
             position_elements = b * 3 * num_tokens * 2
             timestep_elements = b * num_tokens
+            context_elements = math.prod(context_shape)
             denoise_floor_bytes = (
                 latent_elements * 4 * 8
                 + position_elements * 8 * 2
                 + timestep_elements * 4 * 4
+                + context_elements * 4 * 8
             )
             self._check_host_allocation(
                 denoise_floor_bytes,

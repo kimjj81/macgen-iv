@@ -3298,6 +3298,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.context_emb = object()
         pipe._mlx_runtime_ready = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
@@ -3365,6 +3366,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             dtype = "float32"
             shape = (1, 128, 4, 32, 32)
 
+        class FakeContext:
+            shape = (1, 4096)
+
         fake_mx = types.SimpleNamespace(
             float32="float32",
             array=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ltx denoise failed")),
@@ -3389,7 +3393,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.config = types.SimpleNamespace(in_channels=128)
-        pipe.context_emb = object()
+        pipe.context_emb = FakeContext()
         pipe._mlx_runtime_ready = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
@@ -3432,12 +3436,45 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="decode called before load_model"):
             pipe.decode(FakeLatents())
 
+    def test_ltx23_denoise_requires_text_encoding_before_mlx_import(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"mlx", "mlx.core"} or name.startswith("mlx_video"):
+                raise AssertionError("denoise_step must not import MLX before text encoding exists")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+
+        with pytest.raises(RuntimeError, match="denoise_step called before encode_text"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
+
     def test_ltx23_denoise_preflights_intermediate_tensors_before_mx_array(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
         class FakeLatents:
             dtype = "float32"
             shape = (1, 128, 4, 32, 32)
+
+        class FakeContext:
+            shape = (1, 4096)
 
         fake_mx = types.SimpleNamespace(
             array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be preflighted")),
@@ -3459,6 +3496,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.context_emb = FakeContext()
         pipe._mlx_runtime_ready = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
@@ -3486,6 +3524,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             dtype = "float32"
             shape = SinglePassShape((1, 128, 4, 32, 32))
 
+        class FakeContext:
+            shape = (1, 4096)
+
         fake_mx = types.SimpleNamespace(
             array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be preflighted")),
             float32="float32",
@@ -3506,6 +3547,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.context_emb = FakeContext()
         pipe._mlx_runtime_ready = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
@@ -3521,6 +3563,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             dtype = "float32"
             shape = (1, 128, 64, 1024, 1024)
+
+        class FakeContext:
+            shape = (1, 4096)
 
         fake_mx = types.SimpleNamespace(
             array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be rejected first")),
@@ -3542,11 +3587,50 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.config = types.SimpleNamespace(in_channels=128)
         pipe.model = object()
+        pipe.context_emb = FakeContext()
         pipe._mlx_runtime_ready = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="latent shape .* expected"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
+
+    def test_ltx23_denoise_rejects_context_shape_mismatch_before_mx_array(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        class FakeContext:
+            shape = (1, 65_536)
+
+        fake_mx = types.SimpleNamespace(
+            array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be rejected first")),
+            float32="float32",
+        )
+        transformer_module = types.ModuleType("mlx_video.models.ltx_2.transformer")
+        transformer_module.Modality = object
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, "mlx_video.models.ltx_2.transformer", transformer_module)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.config = types.SimpleNamespace(in_channels=128, cross_attention_dim=4096)
+        pipe.model = object()
+        pipe.context_emb = FakeContext()
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="context shape .* expected"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
     def test_ltx23_encode_text_resolves_text_assets_before_mlx_import(self, tmp_path, monkeypatch):
@@ -5157,6 +5241,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.context_emb = object()
         pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
             AssertionError("memory check must not run for invalid denoise arguments")
         )
