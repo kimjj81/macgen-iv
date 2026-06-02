@@ -153,6 +153,13 @@ CLI MLX runs are one heavy model execution per process by default. A profile
 suite must stop after the first completed MLX run and resume later from a fresh
 process or a child-process orchestrator, because Python-level cleanup cannot
 prove all Metal state has been released.
+Until a CLI child-process orchestrator exists, real non-scaffold MLX backend
+execution in the CLI parent process must fail closed unless the caller sets:
+
+```bash
+FASTGEN_CLI_ALLOW_PARENT_MLX=1
+```
+
 CLI pre-run checks must remain system-only: they may check memory telemetry,
 shape budgets, prompt budgets, cleanup, and cooldown, but must not configure
 MLX allocator limits before the backend has completed local model config and

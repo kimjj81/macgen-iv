@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -77,6 +78,7 @@ MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
 MAX_CLI_FRAMES = MAX_RUN_FRAMES
 MAX_CLI_STEPS = MAX_RUN_STEPS
 MAX_CLI_FPS = MAX_RUN_FPS
+ALLOW_PARENT_MLX_ENV = "FASTGEN_CLI_ALLOW_PARENT_MLX"
 
 app = typer.Typer(
     help="Profile MLX video generation experiments and write benchmark JSONL.",
@@ -337,6 +339,11 @@ def run_command(options: RunOptions) -> int:
                 records = _error_records_for_config(config, error=guard_error)
                 append_jsonl(options.result_jsonl, records)
                 return 1
+            parent_error = _mlx_parent_process_execution_error(options, backend)
+            if parent_error is not None:
+                records = _error_records_for_config(config, error=parent_error)
+                append_jsonl(options.result_jsonl, records)
+                return 1
 
         memory_aborted = False
         guard_failed = False
@@ -440,6 +447,18 @@ def _mlx_runtime_required(options: RunOptions, backend: object) -> bool:
     # invariant independent from adapter implementation details so replacing
     # the scaffold with a real adapter cannot silently bypass memory gates.
     return True
+
+
+def _mlx_parent_process_execution_error(options: RunOptions, backend: object) -> str | None:
+    if options.backend != "mlx" or _backend_is_scaffold_only(backend):
+        return None
+    if os.environ.get(ALLOW_PARENT_MLX_ENV) == "1":
+        return None
+    return (
+        f"Memory guard blocked run: real MLX backend execution in the CLI parent process "
+        f"requires {ALLOW_PARENT_MLX_ENV}=1 until a CLI child-process orchestrator is available. "
+        "This prevents Metal state from accumulating in the long-lived parent process."
+    )
 
 
 def _memory_guard_error_type() -> type[Exception]:
@@ -729,6 +748,20 @@ def profile_command(options: RunOptions) -> int:
                     profile_name=profile_name,
                     spec=effective_spec,
                     error=guard_error,
+                    candidate=candidate,
+                )
+                append_jsonl(options.result_jsonl, records)
+                all_records.extend(record.to_dict() for record in records)
+                break
+            parent_error = _mlx_parent_process_execution_error(options, backend)
+            if parent_error is not None:
+                memory_guard_failed = True
+                records = _profile_error_records(
+                    options=options,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    spec=effective_spec,
+                    error=parent_error,
                     candidate=candidate,
                 )
                 append_jsonl(options.result_jsonl, records)

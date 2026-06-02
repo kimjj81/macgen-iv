@@ -751,12 +751,116 @@ def test_mlx_run_applies_pre_run_memory_guard(tmp_path, monkeypatch):
     assert "Memory guard blocked run" in records[0]["error"]
 
 
+def test_mlx_real_backend_requires_parent_process_opt_in(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(AssertionError("parent Profiler.run must be blocked")),
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx parent blocked",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert len(records) == 1
+    assert records[0]["phase"] == "total"
+    assert cli_module.ALLOW_PARENT_MLX_ENV in records[0]["error"]
+    assert "parent process" in records[0]["error"]
+
+
+def test_mlx_profile_real_backend_requires_parent_process_opt_in(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "mlx-profile.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(AssertionError("parent Profiler.run must be blocked")),
+    )
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "profile parent blocked",
+            "--seed",
+            "12",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert len(records) == 1
+    assert records[0]["phase"] == "total"
+    assert records[0]["model_path"] == str(model_path.resolve())
+    assert cli_module.ALLOW_PARENT_MLX_ENV in records[0]["error"]
+    assert "parent process" in records[0]["error"]
+
+
 def test_mlx_runtime_abort_records_cleanup_status(tmp_path, monkeypatch):
     from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
     monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
     monkeypatch.setattr(
@@ -824,6 +928,7 @@ def test_mlx_run_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatc
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
     monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
     monkeypatch.setattr(
@@ -911,6 +1016,7 @@ def test_mlx_profile_cleanup_failure_fails_closed_after_success(tmp_path, monkey
     jsonl_path = tmp_path / "mlx-profile.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
     monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
     monkeypatch.setattr(
@@ -1089,6 +1195,7 @@ def test_mlx_inner_memory_guard_error_records_cleanup_status(tmp_path, monkeypat
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
     monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
     monkeypatch.setattr(
@@ -1156,6 +1263,7 @@ def test_mlx_profile_inner_memory_guard_error_preserves_model_candidate(tmp_path
     jsonl_path = tmp_path / "mlx-profile.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
     monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
     monkeypatch.setattr(
