@@ -504,6 +504,39 @@ def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeyp
     assert cleanup_calls == ["cleanup"]
 
 
+def test_steps_benchmark_generic_failure_consumes_process_slot(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_generic_failure_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_VALUES", "1")
+    spec.loader.exec_module(module)
+
+    calls: list[str] = []
+    monkeypatch.setattr(module, "run_counter", lambda: 0)
+    monkeypatch.setattr(module, "should_restart_process", lambda: False)
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(RuntimeError("metal state unknown")),
+    )
+    monkeypatch.setattr(module, "increment_run_counter", lambda: calls.append("counter") or 1)
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: calls.append("cleanup") or {"freed_gb": 0})
+
+    assert module.main() == 1
+
+    assert calls == ["counter", "cleanup"]
+    records = [
+        json.loads(line)
+        for line in module.RESULTS_JSONL.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records == [{"steps": 1, "error": "metal state unknown"}]
+
+
 def test_steps_benchmark_rejects_unexpected_video_shape_before_png_save(tmp_path, monkeypatch):
     import importlib.util
     import numpy as np

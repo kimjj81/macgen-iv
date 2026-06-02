@@ -71,6 +71,9 @@ contiguous, converted, or temporary buffers outside MLX allocator counters.
 Model config dimensions used for preflight budgeting must be real integer
 values. Float or string coercion is unsafe because truncation or implicit
 conversion can understate the allocation floor before MLX/Metal construction.
+Text-token budget dimensions such as max token count, text length, and hidden
+size follow the same rule; token preflight must reject coerced values before
+tokenizer or text-encoder work starts.
 
 ## Direct Scripts
 

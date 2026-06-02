@@ -521,7 +521,9 @@ def main():
             import traceback
             traceback.print_exc()
             all_results.append({"steps": steps, "error": str(e)})
-            # Still cleanup after failure to prevent cascading issues
+            # Treat unknown failures as a consumed MLX process slot: the error
+            # may have happened after Metal state was initialized.
+            increment_run_counter()
             mlx_cleanup()
 
     # Write JSONL

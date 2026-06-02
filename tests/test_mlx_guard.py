@@ -3736,6 +3736,43 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(MemoryGuardError, match="token sequence is 3 tokens"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, in_features=16)
 
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("max_position_embeddings", "2", "max_position_embeddings=.*positive structural dimension"),
+            ("max_position_embeddings", 2.5, "max_position_embeddings=.*positive structural dimension"),
+            ("hidden_size", "16", "hidden_size=.*positive structural dimension"),
+        ],
+    )
+    def test_ltx23_text_encoder_rejects_non_integer_token_budget_config(
+        self, tmp_path, monkeypatch, field, value, message
+    ):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
+        config_path = text_encoder_dir / "config.json"
+        full_config = json.loads(config_path.read_text(encoding="utf-8"))
+        full_config["text_config"][field] = value
+        config_path.write_text(json.dumps(full_config), encoding="utf-8")
+        _install_fake_transformers_tokenizer(monkeypatch, token_count=1)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match=message):
+            pipe._preflight_text_prompt_tokens("prompt", text_encoder_dir, tokenizer_dir)
+
     def test_wan22_text_encoder_rejects_token_sequence_before_external_encode(self, tmp_path, monkeypatch):
         import numpy as np
         import fastgen_profiler.mlx_guard as mlx_guard
@@ -3776,6 +3813,48 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.latent_shape = (16, 1, 1, 1)
 
         with pytest.raises(MemoryGuardError, match="token sequence is 3 tokens"):
+            pipe.encode_text({"prompt": "prompt", "negative_prompt": ""})
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("text_len", "128", "text_len=.*positive integer"),
+            ("text_len", 128.5, "text_len=.*positive integer"),
+            ("dim", "4096", "dim=.*positive integer"),
+        ],
+    )
+    def test_wan22_text_encoder_rejects_non_integer_token_budget_config(self, tmp_path, field, value, message):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeTokenizer:
+            def __call__(self, prompt, return_tensors):
+                return {"input_ids": [[1]]}
+
+        config_values = {
+            "text_len": 128,
+            "dim": 4096,
+            "patch_size": (1, 1, 1),
+            "sample_neg_prompt": "",
+        }
+        config_values[field] = value
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            guidance=1.0,
+        )
+        pipe.mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+        pipe.config = types.SimpleNamespace(**config_values)
+        pipe.model = object()
+        pipe.t5_encoder = object()
+        pipe.tokenizer = FakeTokenizer()
+        pipe.seq_len = 1
+        pipe.latent_shape = (16, 1, 1, 1)
+
+        with pytest.raises(RuntimeMemoryAbort, match=message):
             pipe.encode_text({"prompt": "prompt", "negative_prompt": ""})
 
     def test_wan22_text_encoder_preflights_rope_tensors_before_external_encode(self, tmp_path, monkeypatch):

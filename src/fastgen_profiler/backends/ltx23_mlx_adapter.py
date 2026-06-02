@@ -287,12 +287,17 @@ class LTX23MLXPipeline:
         )
         vocab_size = _positive_structural_int(text_config.get("vocab_size", 0), "vocab_size")
         heads = _positive_structural_int(text_config.get("num_attention_heads", 1), "num_attention_heads")
+        max_positions = _positive_structural_int(
+            text_config.get("max_position_embeddings", 1),
+            "max_position_embeddings",
+        )
         for key, value in {
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "num_hidden_layers": layers,
             "vocab_size": vocab_size,
             "num_attention_heads": heads,
+            "max_position_embeddings": max_positions,
         }.items():
             if value <= 0:
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
@@ -345,10 +350,15 @@ class LTX23MLXPipeline:
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
         tokens = tokenizer(prompt, return_tensors="np")
         input_ids = tokens["input_ids"][0]
+        max_tokens = _positive_structural_int(
+            text_config["max_position_embeddings"],
+            "max_position_embeddings",
+        )
+        hidden_size = _positive_structural_int(text_config["hidden_size"], "hidden_size")
         check_token_sequence_budget(
             token_count=len(input_ids),
-            max_tokens=int(text_config["max_position_embeddings"]),
-            hidden_size=int(text_config["hidden_size"]),
+            max_tokens=max_tokens,
+            hidden_size=hidden_size,
             label="ltx2.3 text_encoder",
         )
 
@@ -587,10 +597,15 @@ class LTX23MLXPipeline:
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
         tokens = tokenizer(prompt, return_tensors="np")
         input_ids = tokens["input_ids"][0]
+        max_tokens = _positive_structural_int(
+            text_config["max_position_embeddings"],
+            "max_position_embeddings",
+        )
+        hidden_size = _positive_structural_int(text_config["hidden_size"], "hidden_size")
         check_token_sequence_budget(
             token_count=len(input_ids),
-            max_tokens=int(text_config["max_position_embeddings"]),
-            hidden_size=int(text_config["hidden_size"]),
+            max_tokens=max_tokens,
+            hidden_size=hidden_size,
             label="ltx2.3 text_encoder",
         )
 

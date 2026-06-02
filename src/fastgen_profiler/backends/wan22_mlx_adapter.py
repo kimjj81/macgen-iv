@@ -230,11 +230,11 @@ class Wan22MLXPipeline:
             raise RuntimeError("mx.compile is disabled for baseline MLX benchmarking; rerun with --compile off")
 
     def _preflight_model_config(self, config: Any, phase: str) -> None:
-        hidden_size = int(getattr(config, "dim", getattr(config, "hidden_size", 4096)))
-        ffn_size = int(getattr(config, "ffn_dim", hidden_size * 4))
-        layers = int(getattr(config, "num_layers", getattr(config, "num_hidden_layers", 1)))
-        heads = int(getattr(config, "num_heads", getattr(config, "num_attention_heads", 1)))
-        text_dim = int(getattr(config, "text_dim", hidden_size))
+        hidden_size = _positive_int(getattr(config, "dim", getattr(config, "hidden_size", 4096)), "dim")
+        ffn_size = _positive_int(getattr(config, "ffn_dim", hidden_size * 4), "ffn_dim")
+        layers = _positive_int(getattr(config, "num_layers", getattr(config, "num_hidden_layers", 1)), "num_layers")
+        heads = _positive_int(getattr(config, "num_heads", getattr(config, "num_attention_heads", 1)), "num_heads")
+        text_dim = _positive_int(getattr(config, "text_dim", hidden_size), "text_dim")
         for key, value in {
             "dim": hidden_size,
             "ffn_dim": ffn_size,
@@ -434,10 +434,11 @@ class Wan22MLXPipeline:
         if not self.cfg_disabled:
             self._check_prompt_token_budget(prepared_prompt["negative_prompt"], "text_encoder negative_prompt")
 
-        text_dim = int(getattr(self.config, "dim", 4096))
+        text_dim = _positive_int(getattr(self.config, "dim", 4096), "dim")
+        text_len = _positive_int(self.config.text_len, "text_len")
         cfg_factor = 1 if self.cfg_disabled else 2
         self._check_mlx_tensor_floor(
-            int(self.config.text_len) * text_dim * cfg_factor,
+            text_len * text_dim * cfg_factor,
             "text_encoder context tensors",
             multiplier=6,
         )
@@ -505,16 +506,18 @@ class Wan22MLXPipeline:
 
         tokens = self.tokenizer(prompt, return_tensors="np")
         input_ids = tokens["input_ids"][0]
-        hidden_size = int(
+        hidden_size = _positive_int(
             getattr(
                 self.config,
                 "text_dim",
                 getattr(self.config, "dim", getattr(self.config, "hidden_size", 4096)),
-            )
+            ),
+            "text_dim",
         )
+        max_tokens = _positive_int(self.config.text_len, "text_len")
         check_token_sequence_budget(
             token_count=len(input_ids),
-            max_tokens=int(self.config.text_len),
+            max_tokens=max_tokens,
             hidden_size=hidden_size,
             label=f"wan2.2 {phase}",
         )
