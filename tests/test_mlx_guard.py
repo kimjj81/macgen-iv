@@ -6029,10 +6029,15 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
 
-        with pytest.raises(RuntimeMemoryAbort, match="cannot stat"):
+        with pytest.raises(RuntimeMemoryAbort, match="cannot stat") as ltx_abort:
             ltx._check_file_load(missing, "read missing")
-        with pytest.raises(RuntimeMemoryAbort, match="cannot stat"):
+        assert ltx_abort.value.__cause__ is None
+        assert ltx_abort.value.__context__ is None
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot stat") as wan_abort:
             wan._check_file_load(missing, "read missing")
+        assert wan_abort.value.__cause__ is None
+        assert wan_abort.value.__context__ is None
 
     def test_ltx23_directory_preflight_sums_safetensors(self, tmp_path):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -6070,6 +6075,32 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeMemoryAbort, match="cannot scan"):
             pipe._check_directory_load(tmp_path / "missing-dir", "read missing")
+
+    def test_ltx23_directory_preflight_detaches_scan_failure_context(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        model_dir = tmp_path / "vae"
+        model_dir.mkdir()
+
+        def fail_scandir(path):
+            raise OSError("unsafe scan failure")
+
+        monkeypatch.setattr(ltx23_mlx_adapter.os, "scandir", fail_scandir)
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot scan") as caught:
+            pipe._check_directory_load(model_dir, "read vae")
+
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
     def test_ltx23_directory_preflight_rejects_excessive_recursive_scan(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends import ltx23_mlx_adapter
@@ -6939,6 +6970,51 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert raised[0].__cause__ is None
         assert raised[0].__context__ is None
 
+    def test_ltx23_phase_abort_reports_cleanup_failure(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeRandom:
+            def seed(self, seed):
+                pass
+
+            def normal(self, shape):
+                raise RuntimeError("metal allocation failed")
+
+        cleanup_errors: list[RuntimeError] = []
+
+        def cleanup():
+            exc = RuntimeError("cleanup failed")
+            cleanup_errors.append(exc)
+            raise exc
+
+        fake_mx = types.SimpleNamespace(random=FakeRandom(), eval=lambda *args: None)
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.model = object()
+        pipe._ensure_mlx_runtime_ready = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX cleanup also failed: cleanup failed") as caught:
+            pipe.init_latents(seed=1, width=256, height=256, frames=4)
+
+        assert "metal allocation failed" in str(caught.value)
+        assert cleanup_errors
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
+
     def test_ltx23_decode_runtime_abort_from_upsampled_shape_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -7409,6 +7485,48 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert raised[0].__traceback__ is None
         assert raised[0].__cause__ is None
         assert raised[0].__context__ is None
+
+    def test_wan22_phase_abort_reports_cleanup_failure(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeRandom:
+            def seed(self, seed):
+                pass
+
+            def normal(self, shape):
+                raise RuntimeError("metal allocation failed")
+
+        cleanup_errors: list[RuntimeError] = []
+
+        def cleanup():
+            exc = RuntimeError("cleanup failed")
+            cleanup_errors.append(exc)
+            raise exc
+
+        fake_mx = types.SimpleNamespace(random=FakeRandom(), eval=lambda *args: None)
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = fake_mx
+        pipe.latent_shape = (48, 1, 16, 16)
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX cleanup also failed: cleanup failed") as caught:
+            pipe.init_latents(seed=1, width=256, height=256, frames=4)
+
+        assert "metal allocation failed" in str(caught.value)
+        assert cleanup_errors
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
 
     def test_wan22_decode_rejects_unexpected_frame_shape_before_numpy(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline

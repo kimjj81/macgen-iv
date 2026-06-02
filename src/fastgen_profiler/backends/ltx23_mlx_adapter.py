@@ -222,12 +222,15 @@ class LTX23MLXPipeline:
 
         self._poison_after_runtime_failure()
         gc.collect()
-        _cleanup_loaded_runtime_after_error(exc)
+        cleanup_error = _cleanup_loaded_runtime_after_error(exc)
         detail = _safe_exception_detail(exc)
-        return RuntimeMemoryAbort(
+        message = (
             f"Runtime memory abort [ltx2.3 {phase}]: {failure}: {detail}; "
             "pipeline was discarded to avoid retaining unsafe runtime state."
         )
+        if cleanup_error is not None:
+            message += f" MLX cleanup also failed: {cleanup_error}."
+        return RuntimeMemoryAbort(message)
 
     def _check_memory(self, phase: str) -> None:
         try:
@@ -248,13 +251,15 @@ class LTX23MLXPipeline:
         check_host_allocation_headroom(required_bytes, label=f"ltx2.3 {phase}")
 
     def _check_file_load(self, path: Path, phase: str) -> None:
+        abort: BaseException | None = None
         try:
             size = path.stat().st_size
-        except OSError as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
+        except OSError:
+            abort = _runtime_abort(
                 f"cannot stat {path} before loading {phase}; refusing to load without host allocation preflight"
-            ) from exc
+            )
+        if abort is not None:
+            raise abort
         # safetensors load can briefly hold file buffers plus filtered arrays.
         self._check_host_allocation(size * 2, phase)
 
@@ -1290,14 +1295,15 @@ def _positive_structural_int(value: Any, key: str) -> int:
 
 
 def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
+    abort: BaseException | None = None
     try:
         size = path.stat().st_size
-    except OSError as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        raise RuntimeMemoryAbort(
+    except OSError:
+        abort = _runtime_abort(
             f"cannot stat {path} before reading LTX2.3 {label}; refusing unbounded config load"
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
     if size > _MAX_CONFIG_JSON_BYTES:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -1317,15 +1323,16 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
 
 
 def _read_bounded_text_file(path: Path, *, label: str) -> str:
+    abort: BaseException | None = None
     try:
         with path.open("rb") as handle:
             data = handle.read(_MAX_CONFIG_JSON_BYTES + 1)
-    except OSError as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        raise RuntimeMemoryAbort(
+    except OSError:
+        abort = _runtime_abort(
             f"cannot read {path} before reading LTX2.3 {label}; refusing unbounded config load"
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
     if len(data) > _MAX_CONFIG_JSON_BYTES:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -1378,9 +1385,11 @@ def _recursive_safetensor_size(path: Path, phase: str) -> int:
                 f"cannot scan {path} before loading {phase}; directory scan exceeded "
                 f"{_MAX_PRELOAD_SCAN_DIRS} directories"
             )
+        abort: BaseException | None = None
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
+                    abort = None
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(Path(entry.path))
@@ -1388,10 +1397,12 @@ def _recursive_safetensor_size(path: Path, phase: str) -> int:
                         if not entry.is_file(follow_symlinks=False):
                             continue
                     except OSError:
-                        _raise_runtime_abort(
+                        abort = _runtime_abort(
                             f"cannot scan {entry.path} before loading {phase}; "
                             "refusing to load without host allocation preflight"
                         )
+                    if abort is not None:
+                        raise abort
                     scanned_files += 1
                     if scanned_files > _MAX_PRELOAD_SCAN_FILES:
                         _raise_runtime_abort(
@@ -1399,23 +1410,29 @@ def _recursive_safetensor_size(path: Path, phase: str) -> int:
                             f"{_MAX_PRELOAD_SCAN_FILES} files"
                         )
                     if entry.name.endswith(".safetensors"):
+                        abort = None
                         try:
                             total += entry.stat(follow_symlinks=False).st_size
                         except OSError:
-                            _raise_runtime_abort(
+                            abort = _runtime_abort(
                                 f"cannot stat {entry.path} before loading {phase}; "
                                 "refusing to load without host allocation preflight"
                             )
+                        if abort is not None:
+                            raise abort
         except OSError:
-            _raise_runtime_abort(
+            abort = _runtime_abort(
                 f"cannot scan {current} before loading {phase}; refusing to load without host allocation preflight"
             )
+        if abort is not None:
+            raise abort
     return total
 
 
 def _flat_file_size_total(path: Path, phase: str) -> int:
     total = 0
     scanned = 0
+    abort: BaseException | None = None
     try:
         for entry in path.iterdir():
             scanned += 1
@@ -1427,15 +1444,18 @@ def _flat_file_size_total(path: Path, phase: str) -> int:
             if entry.is_file():
                 total += entry.stat().st_size
     except OSError:
-        _raise_runtime_abort(
+        abort = _runtime_abort(
             f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
         )
+    if abort is not None:
+        raise abort
     return total
 
 
 def _flat_safetensor_names(path: Path, phase: str) -> list[str]:
     names: list[str] = []
     scanned = 0
+    abort: BaseException | None = None
     try:
         for entry in path.iterdir():
             scanned += 1
@@ -1447,13 +1467,15 @@ def _flat_safetensor_names(path: Path, phase: str) -> list[str]:
             if entry.is_file() and entry.name.endswith(".safetensors"):
                 names.append(entry.name)
     except OSError:
-        _raise_runtime_abort(
+        abort = _runtime_abort(
             f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
         )
+    if abort is not None:
+        raise abort
     return sorted(names)
 
 
-def _raise_runtime_abort(message: str) -> None:
+def _runtime_abort(message: str) -> BaseException:
     from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
 
     try:
@@ -1461,7 +1483,11 @@ def _raise_runtime_abort(message: str) -> None:
     except Exception:
         pass
 
-    raise RuntimeMemoryAbort(message)
+    return RuntimeMemoryAbort(message)
+
+
+def _raise_runtime_abort(message: str) -> None:
+    raise _runtime_abort(message)
 
 
 def _numpy() -> Any:
@@ -1702,17 +1728,21 @@ def _normalize_video_frames(np: Any, frames: Any) -> Any:
     return frames.astype(np.uint8, copy=False)
 
 
-def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> None:
+def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> str | None:
     if exc is not None:
         _clear_traceback_frames(exc)
     try:
         from fastgen_profiler.mlx_guard import mlx_cleanup
 
         mlx_cleanup()
-    except Exception:
-        pass
+    except Exception as cleanup_exc:
+        cleanup_error = _safe_exception_detail(cleanup_exc)
+        _clear_traceback_frames(cleanup_exc)
+        _detach_exception(cleanup_exc)
+        return cleanup_error
     if exc is not None:
         _detach_exception(exc)
+    return None
 
 
 def _clear_traceback_frames(exc: BaseException) -> None:
