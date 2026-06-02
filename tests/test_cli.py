@@ -1127,6 +1127,84 @@ def test_mlx_runtime_abort_records_cleanup_status(tmp_path, monkeypatch):
     }
 
 
+def test_mlx_runtime_abort_clears_traceback_locals_before_cleanup(tmp_path, monkeypatch):
+    import gc
+    import weakref
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+
+    class HeavyLocal:
+        pass
+
+    ref: weakref.ReferenceType[object] | None = None
+
+    def run_failure(self, config):
+        nonlocal ref
+        heavy = HeavyLocal()
+        ref = weakref.ref(heavy)
+        raise RuntimeMemoryAbort("runtime stop")
+
+    def cleanup(label):
+        gc.collect()
+        assert ref is not None
+        assert ref() is None
+        return {"cleanup": {"mlx_cache_cleared": True, "mlx_cleanup_error": None}}
+
+    monkeypatch.setattr(cli_module, "_mlx_post_run_cleanup", cleanup)
+    monkeypatch.setattr(cli_module.Profiler, "run", run_failure)
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx abort",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["error"] == "Runtime memory abort: runtime stop"
+
+
 def test_mlx_run_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatch):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
@@ -1213,6 +1291,64 @@ def test_mlx_run_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatc
         "mlx_cache_cleared": False,
         "mlx_cleanup_error": "failed to clear MLX cache",
     }
+
+
+def test_mlx_profile_runtime_abort_clears_traceback_locals_before_cleanup(tmp_path, monkeypatch):
+    import gc
+    import weakref
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    jsonl_path = tmp_path / "mlx-profile.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setenv(cli_module.ALLOW_PARENT_MLX_ENV, "1")
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+
+    class HeavyLocal:
+        pass
+
+    ref: weakref.ReferenceType[object] | None = None
+
+    def run_failure(self, config):
+        nonlocal ref
+        heavy = HeavyLocal()
+        ref = weakref.ref(heavy)
+        raise RuntimeMemoryAbort("runtime stop")
+
+    def cleanup(label):
+        gc.collect()
+        assert ref is not None
+        assert ref() is None
+        return {"cleanup": {"mlx_cache_cleared": True, "mlx_cleanup_error": None}}
+
+    monkeypatch.setattr(cli_module, "_mlx_post_run_cleanup", cleanup)
+    monkeypatch.setattr(cli_module.Profiler, "run", run_failure)
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "profile abort",
+            "--seed",
+            "12",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["error"] == "Runtime memory abort: runtime stop"
 
 
 def test_mlx_profile_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatch):
@@ -1771,6 +1907,85 @@ def test_mlx_post_run_cleanup_reports_guard_import_failure(monkeypatch):
         "mlx_cache_cleared": False,
         "mlx_cleanup_error": "mlx_guard unavailable after MLX run",
     }
+
+
+def test_mlx_post_run_cleanup_reports_cleanup_exception(monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    class UnsafeCleanupError(RuntimeError):
+        def __str__(self):
+            raise AssertionError("cleanup failure must not stringify the original exception")
+
+        def __repr__(self):
+            raise AssertionError("cleanup failure must not repr the original exception")
+
+    raised: list[UnsafeCleanupError] = []
+
+    def cleanup():
+        exc = UnsafeCleanupError("cleanup failed")
+        raised.append(exc)
+        raise exc
+
+    monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+    monkeypatch.setattr(
+        mlx_guard,
+        "increment_run_counter",
+        lambda: (_ for _ in ()).throw(AssertionError("counter must not run after cleanup failure")),
+    )
+
+    status = cli_module._mlx_post_run_cleanup("cleanup-exception")
+
+    assert status is not None
+    assert status["snapshot"] is None
+    assert status["run_number"] is None
+    assert status["cleanup"] == {
+        "mlx_loaded": None,
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": "mlx_cleanup raised: cleanup failed",
+    }
+    assert raised
+    assert raised[0].__traceback__ is None
+    assert raised[0].__cause__ is None
+    assert raised[0].__context__ is None
+
+
+def test_mlx_post_run_cleanup_reports_counter_exception(monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    class UnsafeCounterError(RuntimeError):
+        def __str__(self):
+            raise AssertionError("counter failure must not stringify the original exception")
+
+        def __repr__(self):
+            raise AssertionError("counter failure must not repr the original exception")
+
+    raised: list[UnsafeCounterError] = []
+
+    def increment():
+        exc = UnsafeCounterError("counter failed")
+        raised.append(exc)
+        raise exc
+
+    monkeypatch.setattr(
+        mlx_guard,
+        "mlx_cleanup",
+        lambda: {"mlx_cache_cleared": True, "mlx_cleanup_error": None},
+    )
+    monkeypatch.setattr(mlx_guard, "increment_run_counter", increment)
+
+    status = cli_module._mlx_post_run_cleanup("counter-exception")
+
+    assert status is not None
+    assert status["snapshot"] is None
+    assert status["run_number"] is None
+    assert status["cleanup"] == {
+        "mlx_cache_cleared": True,
+        "mlx_cleanup_error": "mlx cleanup bookkeeping failed: counter failed",
+    }
+    assert raised
+    assert raised[0].__traceback__ is None
+    assert raised[0].__cause__ is None
+    assert raised[0].__context__ is None
 
 
 def test_mlx_post_run_cleanup_keeps_cleanup_when_snapshot_fails(monkeypatch):

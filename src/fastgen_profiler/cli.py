@@ -361,9 +361,11 @@ def run_command(options: RunOptions) -> int:
         except _memory_guard_error_type() as exc:
             guard_failed = True
             guard_error = f"Memory guard blocked run: {_safe_exception_text(exc)}"
+            _release_exception_for_cleanup(exc)
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
             runtime_abort_error = f"Runtime memory abort: {_safe_exception_text(exc)}"
+            _release_exception_for_cleanup(exc)
         finally:
             if mlx_runtime_required:
                 cleanup_status = _mlx_post_run_cleanup(config.variant_label or "manual")
@@ -570,16 +572,48 @@ def _mlx_post_run_cleanup(label: str) -> dict[str, object] | None:
     try:
         from fastgen_profiler.mlx_guard import increment_run_counter, mlx_cleanup, system_snapshot
 
-        cleanup = mlx_cleanup()
-        completed_runs = increment_run_counter()
+        try:
+            cleanup = mlx_cleanup()
+        except Exception as exc:
+            cleanup_error = _safe_exception_text(exc)
+            _detach_exception(exc)
+            typer.echo(
+                f"[guard] post-run '{label}': cleanup failed: {cleanup_error}"
+            )
+            return {
+                "snapshot": None,
+                "cleanup": {
+                    "mlx_loaded": None,
+                    "mlx_cache_cleared": False,
+                    "mlx_cleanup_error": f"mlx_cleanup raised: {cleanup_error}",
+                },
+                "run_number": None,
+            }
+        try:
+            completed_runs = increment_run_counter()
+        except Exception as exc:
+            counter_error = _safe_exception_text(exc)
+            _detach_exception(exc)
+            typer.echo(
+                f"[guard] post-run '{label}': cleanup completed but run counter failed: "
+                f"{counter_error}"
+            )
+            cleanup_status = dict(cleanup) if isinstance(cleanup, dict) else cleanup
+            if isinstance(cleanup_status, dict):
+                if not cleanup_status.get("mlx_cleanup_error"):
+                    cleanup_status["mlx_cleanup_error"] = (
+                        f"mlx cleanup bookkeeping failed: {counter_error}"
+                    )
+            return {"snapshot": None, "cleanup": cleanup_status, "run_number": None}
         try:
             snap = system_snapshot()
         except Exception:
             snap = None
+        freed_gb = cleanup.get("freed_gb", "?") if isinstance(cleanup, dict) else "?"
         typer.echo(
             f"[guard] post-run '{label}': run={completed_runs} "
             f"{snap.summary() if snap is not None else 'free=?GB'} "
-            f"freed={cleanup.get('freed_gb', '?')}GB"
+            f"freed={freed_gb}GB"
         )
         return {"snapshot": snap, "cleanup": cleanup, "run_number": completed_runs}
     except ImportError as exc:
@@ -810,12 +844,14 @@ def profile_command(options: RunOptions) -> int:
             safe_error = _safe_exception_text(exc)
             logger.warning(f"Memory guard failure for '{spec_label}': {safe_error}")
             guard_error = f"Memory guard blocked run: {safe_error}"
+            _release_exception_for_cleanup(exc)
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
             memory_guard_failed = True
             safe_error = _safe_exception_text(exc)
             logger.warning(f"Runtime memory abort for '{spec_label}': {safe_error}")
             runtime_abort_error = f"Runtime memory abort: {safe_error}"
+            _release_exception_for_cleanup(exc)
         finally:
             if mlx_runtime_required:
                 cleanup_status = _mlx_post_run_cleanup(spec_label)
@@ -1729,6 +1765,33 @@ def _safe_exception_text(exc: BaseException) -> str:
         return parts[0]
     exc_type = type(exc)
     return _summary_text(f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}")
+
+
+def _release_exception_for_cleanup(exc: BaseException) -> None:
+    _clear_exception_traceback_frames(exc)
+    _detach_exception(exc)
+
+
+def _clear_exception_traceback_frames(exc: BaseException) -> None:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
 
 
 def _detach_exception(exc: BaseException) -> None:
