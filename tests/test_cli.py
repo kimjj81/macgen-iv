@@ -2507,9 +2507,13 @@ def test_main_bad_parameter_does_not_stringify_unsafe_exception(monkeypatch):
         def __str__(self):
             raise AssertionError("main error handling must not call BadParameter.__str__")
 
+    raised: list[UnsafeBadParameter] = []
+
     class FakeCommand:
         def main(self, **kwargs):
-            raise UnsafeBadParameter(UnsafeValue())
+            exc = UnsafeBadParameter(UnsafeValue())
+            raised.append(exc)
+            raise exc
 
     monkeypatch.setattr(cli_module.typer.main, "get_command", lambda app: FakeCommand())
 
@@ -2517,6 +2521,12 @@ def test_main_bad_parameter_does_not_stringify_unsafe_exception(monkeypatch):
         main(["run"])
 
     assert "UnsafeValue" in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert raised
+    assert raised[0].__traceback__ is None
+    assert raised[0].__cause__ is None
+    assert raised[0].__context__ is None
 
 
 def _read_jsonl(path):

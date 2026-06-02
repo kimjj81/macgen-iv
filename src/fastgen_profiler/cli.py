@@ -1114,6 +1114,7 @@ def _complete_profile_options(
 def main(argv: list[str] | None = None) -> int:
     command = typer.main.get_command(app)
     args = sys.argv[1:] if argv is None else argv
+    bad_parameter_message = None
     try:
         result = command.main(
             args=args,
@@ -1121,9 +1122,12 @@ def main(argv: list[str] | None = None) -> int:
             standalone_mode=False,
         )
     except click.BadParameter as exc:
-        raise SystemExit(_safe_exception_text(exc)) from exc
+        bad_parameter_message = _safe_exception_text(exc)
+        _detach_exception(exc)
     except click.exceptions.Exit as exc:
         return int(exc.exit_code or 0)
+    if bad_parameter_message is not None:
+        raise SystemExit(bad_parameter_message)
     return int(result or 0)
 
 
@@ -1725,6 +1729,21 @@ def _safe_exception_text(exc: BaseException) -> str:
         return parts[0]
     exc_type = type(exc)
     return _summary_text(f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}")
+
+
+def _detach_exception(exc: BaseException) -> None:
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
 
 
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
