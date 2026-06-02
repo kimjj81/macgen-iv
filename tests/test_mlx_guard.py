@@ -752,10 +752,14 @@ class TestCheckRuntimeMemory:
         monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
         monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", None)
 
-        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry"):
+        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry") as caught:
             check_runtime_memory(label="snapshot-failure")
 
         assert cleanup_calls == ["cleanup"]
+        assert caught.value.__cause__ is not None
+        assert caught.value.__cause__.__traceback__ is None
+        assert caught.value.__cause__.__cause__ is None
+        assert caught.value.__cause__.__context__ is None
 
     def test_runtime_mlx_counter_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
         import gc
@@ -797,10 +801,14 @@ class TestCheckRuntimeMemory:
             ),
         )
 
-        with pytest.raises(RuntimeMemoryAbort, match="cannot read MLX allocator memory"):
+        with pytest.raises(RuntimeMemoryAbort, match="cannot read MLX allocator memory") as caught:
             check_runtime_memory(label="counter-failure")
 
         assert cleanup_calls == ["cleanup"]
+        assert caught.value.__cause__ is not None
+        assert caught.value.__cause__.__traceback__ is None
+        assert caught.value.__cause__.__cause__ is None
+        assert caught.value.__cause__.__context__ is None
 
     @pytest.mark.parametrize("counter_value", [-1, "100", 1.5, True])
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
@@ -2493,8 +2501,15 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         monkeypatch.setitem(sys.modules, "mlx.core", FakeMx())
 
-        with pytest.raises(RuntimeMemoryAbort, match="MLX synchronization failed"):
+        with pytest.raises(RuntimeMemoryAbort, match="MLX synchronization failed") as caught:
             synchronize_mlx(object())
+
+        gc.collect()
+        assert ref is not None
+        assert ref() is None
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert caught.value.__traceback__ is not None
 
     def test_adapter_synchronize_aborts_and_cleans_up_when_loaded_mlx_eval_fails(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -6768,6 +6783,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         ltx23_mlx_adapter._cleanup_loaded_runtime_after_error(exc)
 
         assert cleanup_calls == ["cleanup"]
+        assert exc.__traceback__ is None
+        assert exc.__cause__ is None
+        assert exc.__context__ is None
 
     def test_ltx23_eval_failure_releases_target_before_mlx_cleanup(self, tmp_path, monkeypatch):
         import gc
@@ -7194,6 +7212,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         wan22_mlx_adapter._cleanup_loaded_runtime_after_error(exc)
 
         assert cleanup_calls == ["cleanup"]
+        assert exc.__traceback__ is None
+        assert exc.__cause__ is None
+        assert exc.__context__ is None
 
     def test_wan22_eval_failure_releases_target_before_mlx_cleanup(self, tmp_path, monkeypatch):
         import gc

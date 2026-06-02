@@ -80,16 +80,21 @@ def synchronize_mlx(target: object | None = None) -> None:
 
     try:
         mx.eval(target)
+        return
     except Exception as exc:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
 
         target = None
         _clear_traceback_frames(exc)
         mlx_cleanup()
-        raise RuntimeMemoryAbort(
-            "Runtime memory abort [synchronize]: MLX synchronization failed; "
-            "aborting because Metal runtime state may be unsafe."
-        ) from exc
+        _detach_exception(exc)
+
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    raise RuntimeMemoryAbort(
+        "Runtime memory abort [synchronize]: MLX synchronization failed; "
+        "aborting because Metal runtime state may be unsafe."
+    )
 
 
 def mlx_memory_snapshot() -> dict[str, int | None]:
@@ -134,3 +139,18 @@ def _clear_traceback_frames(exc: BaseException) -> None:
             stack.append(current.__cause__)
         if current.__context__ is not None:
             stack.append(current.__context__)
+
+
+def _detach_exception(exc: BaseException) -> None:
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
