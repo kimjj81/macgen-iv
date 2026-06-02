@@ -260,7 +260,7 @@ def report(
     input: Annotated[Path, typer.Option("--input")] = ...,
     output: Annotated[Path, typer.Option("--output")] = ...,
 ) -> None:
-    records = read_jsonl(input)
+    records = read_jsonl(input, max_records=MAX_REPORT_RECORDS)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_markdown_report(records), encoding="utf-8")
 

@@ -311,6 +311,33 @@ def test_report_command_produces_markdown_from_jsonl(tmp_path):
     assert "Recommended Next Bottleneck" in report
 
 
+def test_report_command_fails_closed_before_rendering_oversized_jsonl(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    report_path = tmp_path / "report.md"
+    monkeypatch.setattr(cli_module, "MAX_REPORT_RECORDS", 1)
+    jsonl_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "run_id": f"run-{index}",
+                    "phase": "total",
+                    "model": "wan2.2",
+                    "backend": "stub",
+                    "seconds": 0.0,
+                }
+            )
+            for index in range(2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="JSONL record limit"):
+        main(["report", "--input", str(jsonl_path), "--output", str(report_path)])
+
+    assert not report_path.exists()
+
+
 def test_profile_summary_bounds_text_and_ignores_non_finite_metrics():
     long_error = "failed: " + ("z" * 1_000)
     records = [
