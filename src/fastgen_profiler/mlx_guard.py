@@ -461,6 +461,12 @@ def configure_mlx_resource_limits(
                 status["previous_wired_limit_gb"] = round(previous / 1e9, 2)
             except Exception as exc:
                 status["wired_limit_error"] = str(exc)
+                mlx_cleanup()
+                raise MemoryGuardError(
+                    f"Memory guard [{label}]: failed to set MLX wired memory limit: {exc}"
+                ) from exc
+    except MemoryGuardError:
+        raise
     except Exception as exc:
         mlx_cleanup()
         raise MemoryGuardError(

@@ -279,6 +279,18 @@ class Wan22MLXPipeline:
                 "aborting because Metal runtime state may be unsafe."
             ) from exc
 
+    def _eval_mlx(self, mx: Any, *targets: Any, phase: str) -> None:
+        try:
+            mx.eval(*targets)
+        except Exception as exc:
+            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+            _cleanup_loaded_runtime_after_error()
+            raise RuntimeMemoryAbort(
+                f"Runtime memory abort [wan2.2 {phase}]: MLX eval failed; "
+                "aborting because Metal runtime state may be unsafe."
+            ) from exc
+
     def load_model(self) -> dict[str, object]:
         if self.model is not None or self.t5_encoder is not None:
             raise RuntimeError(
@@ -363,7 +375,7 @@ class Wan22MLXPipeline:
             self._check_file_load(t5_path, "read t5_encoder")
             self._check_memory("t5_load before")
             self.t5_encoder = load_t5_encoder(t5_path, self.config)
-            mx.eval(_require_non_empty_parameters(self.t5_encoder, "t5_encoder"))
+            self._eval_mlx(mx, _require_non_empty_parameters(self.t5_encoder, "t5_encoder"), phase="t5_load")
             self._check_memory("t5_load after")
             self._check_tokenizer_load(tokenizer_path, "read tokenizer")
             self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), local_files_only=True)
@@ -374,7 +386,7 @@ class Wan22MLXPipeline:
                 self.config,
                 self.quantization,
             )
-            mx.eval(_require_non_empty_parameters(self.model, "transformer"))
+            self._eval_mlx(mx, _require_non_empty_parameters(self.model, "transformer"), phase="model_load")
             self._check_memory("model_load after")
             self.scheduler = FlowUniPCScheduler(num_train_timesteps=self.config.num_train_timesteps)
             self.scheduler.set_timesteps(self.steps, shift=self.config.sample_shift)
@@ -382,8 +394,8 @@ class Wan22MLXPipeline:
             np = _numpy()
             np.random.seed(self.seed)
             return {"model_type": self.config.model_type, "width": self.width, "height": self.height}
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def prepare_prompt(self, *, prompt: str, negative_prompt: str | None) -> dict[str, str]:
@@ -450,9 +462,9 @@ class Wan22MLXPipeline:
             )
             if self.cfg_disabled:
                 context_null = None
-                self.mx.eval(context)
+                self._eval_mlx(self.mx, context, phase="text_encoder context")
                 context_emb = self.model.embed_text([context])
-                self.mx.eval(context_emb)
+                self._eval_mlx(self.mx, context_emb, phase="text_encoder embedding")
                 self.context_cond = context_emb[0:1]
                 self.cross_kv = self.model.prepare_cross_kv(self.context_cond)
             else:
@@ -462,16 +474,16 @@ class Wan22MLXPipeline:
                     prepared_prompt["negative_prompt"],
                     self.config.text_len,
                 )
-                self.mx.eval(context, context_null)
+                self._eval_mlx(self.mx, context, context_null, phase="text_encoder cfg context")
                 context_emb = self.model.embed_text([context, context_null])
-                self.mx.eval(context_emb)
+                self._eval_mlx(self.mx, context_emb, phase="text_encoder cfg embedding")
                 self.context_cfg = self.mx.concatenate([context_emb[0:1], context_emb[1:2]], axis=0)
                 self.cross_kv = self.model.prepare_cross_kv(self.context_cfg)
-            self.mx.eval(self.cross_kv)
+            self._eval_mlx(self.mx, self.cross_kv, phase="text_encoder cross_kv")
 
             rope_grid_sizes = [(f_grid, h_grid, w_grid)] if self.cfg_disabled else [(f_grid, h_grid, w_grid), (f_grid, h_grid, w_grid)]
             self.rope_cos_sin = self.model.prepare_rope(rope_grid_sizes)
-            self.mx.eval(self.rope_cos_sin)
+            self._eval_mlx(self.mx, self.rope_cos_sin, phase="text_encoder rope")
             self._check_memory("text_encoder after")
 
             del context
@@ -482,8 +494,8 @@ class Wan22MLXPipeline:
             gc.collect()
             self.mx.clear_cache()
             return self.context_cond if self.cfg_disabled else self.context_cfg
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def _check_prompt_token_budget(self, prompt: str, phase: str) -> None:
@@ -516,11 +528,11 @@ class Wan22MLXPipeline:
             self.mx.random.seed(seed)
             self._check_mlx_tensor_floor(math.prod(self.latent_shape), "latent_init tensor")
             latents = self.mx.random.normal(self.latent_shape)
-            self.mx.eval(latents)
+            self._eval_mlx(self.mx, latents, phase="latent_init")
             self._check_memory("latent_init after")
             return latents
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
@@ -569,11 +581,11 @@ class Wan22MLXPipeline:
 
             next_latents = self.scheduler.step(noise_pred[None], timestep_val, latents[None]).squeeze(0)
             del noise_pred
-            self.mx.eval(next_latents)
+            self._eval_mlx(self.mx, next_latents, phase=f"denoise {step_index + 1}/{steps} next_latents")
             self._check_memory(f"denoise {step_index + 1}/{steps} after")
             return next_latents
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def decode(self, latents: Any) -> Any:
@@ -597,14 +609,14 @@ class Wan22MLXPipeline:
             self._check_memory("vae_decode before")
             self._check_memory("vae_load before")
             vae = load_vae_decoder(vae_path, self.config)
-            self.mx.eval(vae.parameters())
+            self._eval_mlx(self.mx, vae.parameters(), phase="vae parameters")
             self._check_memory("vae_load after")
             if self.config.vae_z_dim == 48:
                 z = latents.transpose(1, 2, 3, 0)[None]
                 z = denormalize_latents(z)
                 self._check_host_allocation(self.frames * self.height * self.width * 3 * 4 * 4, "vae output tensor")
                 video = vae(z)
-                self.mx.eval(video)
+                self._eval_mlx(self.mx, video, phase="vae video")
                 self._check_memory("vae_forward after")
                 self._validate_frame_shape(video[0], "decode")
                 self._check_host_allocation(math.prod(video[0].shape) * 13, "numpy_frames")
@@ -614,7 +626,7 @@ class Wan22MLXPipeline:
             else:
                 self._check_host_allocation(self.frames * self.height * self.width * 3 * 4 * 4, "vae output tensor")
                 video = vae.decode(latents[None])
-                self.mx.eval(video)
+                self._eval_mlx(self.mx, video, phase="vae video")
                 self._check_memory("vae_forward after")
                 video_slice = video[0]
                 self._validate_frame_shape(video_slice, "decode")
@@ -630,8 +642,8 @@ class Wan22MLXPipeline:
             gc.collect()
             self._check_memory("vae_decode after")
             return frames
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
@@ -698,8 +710,8 @@ class Wan22MLXPipeline:
             save_video(video, str(output_path), fps=fps)
             self._check_memory("file_write after")
             return output_path
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
 
@@ -833,7 +845,12 @@ def _normalize_video_frames(np: Any, frames: Any) -> Any:
     return frames.astype(np.uint8, copy=False)
 
 
-def _cleanup_loaded_runtime_after_error() -> None:
+def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> None:
+    if exc is not None:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        if isinstance(exc, RuntimeMemoryAbort):
+            return
     try:
         from fastgen_profiler.mlx_guard import mlx_cleanup
 

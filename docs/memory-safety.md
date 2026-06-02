@@ -41,13 +41,18 @@ process that has not already loaded MLX for real model work.
 If a synchronization `mx.eval(...)` fails after MLX is loaded, the helper must
 clean up and abort instead of swallowing the exception, because asynchronous
 Metal runtime state may already be unsafe.
+Backend adapter phase code must use the same fail-closed handling for direct
+`mx.eval(...)` calls during model load, text encoding, latent initialization,
+denoising, and VAE decode.
 
 Allocator limits must preserve the configured system reserve. If total-memory
 telemetry is unavailable on macOS, or if the derived safe MLX cap is below the
 minimum usable allocator limit, the run must fail closed instead of starting
 MLX with its default allocator behavior.
 Cache and wired allocator limits must never exceed the configured MLX memory
-limit, even when default values are used.
+limit, even when default values are used. A wired allocator limit setup failure
+must clean up loaded MLX state and fail closed instead of continuing with an
+unbounded wired allocator.
 Allocator and reserve environment overrides must be finite positive numbers;
 `nan`, `inf`, non-positive, and byte-unrepresentable values must fail closed.
 

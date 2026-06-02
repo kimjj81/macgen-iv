@@ -369,6 +369,18 @@ class LTX23MLXPipeline:
                 "aborting because Metal runtime state may be unsafe."
             ) from exc
 
+    def _eval_mlx(self, mx: Any, *targets: Any, phase: str) -> None:
+        try:
+            mx.eval(*targets)
+        except Exception as exc:
+            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+            _cleanup_loaded_runtime_after_error()
+            raise RuntimeMemoryAbort(
+                f"Runtime memory abort [ltx2.3 {phase}]: MLX eval failed; "
+                "aborting because Metal runtime state may be unsafe."
+            ) from exc
+
     def load_model(self) -> dict[str, object]:
         if self.model is not None:
             raise RuntimeError(
@@ -433,7 +445,7 @@ class LTX23MLXPipeline:
                 if filtered_items:
                     self._check_memory(f"model_load before {shard}")
                     self.model.load_weights(filtered_items, strict=False)
-                    mx.eval(self.model.parameters())
+                    self._eval_mlx(mx, self.model.parameters(), phase=f"model_load {shard}")
                     loaded_keys.update(key for key, _ in filtered_items)
                     self._check_memory(f"model_load after {shard}")
                 del weights, filtered_items
@@ -453,12 +465,12 @@ class LTX23MLXPipeline:
                     raise RuntimeError(f"Missing {len(missing)} model params not in weights: {sorted(missing)[:10]}")
 
             self.model.eval()
-            mx.eval(self.model.parameters())
+            self._eval_mlx(mx, self.model.parameters(), phase="model_eval")
 
             return {"model_type": self.config.model_type if self.config else "ltx2.3",
                     "width": self.width, "height": self.height}
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def prepare_prompt(self, *, prompt: str, negative_prompt: str | None) -> dict[str, str]:
@@ -538,7 +550,7 @@ class LTX23MLXPipeline:
             self.text_proj.load_weights(list(filtered_tp.items()))
 
             self.text_proj.eval()
-            mx.eval(self.text_proj.parameters())
+            self._eval_mlx(mx, self.text_proj.parameters(), phase="text_projection parameters")
 
             context_emb = self._encode_with_gemma3(
                 prepared_prompt["prompt"], text_encoder_dir, tokenizer_dir, in_features
@@ -551,8 +563,8 @@ class LTX23MLXPipeline:
             gc.collect()
             mx.clear_cache()
             return self.context_emb
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def _encode_with_gemma3(
@@ -642,7 +654,7 @@ class LTX23MLXPipeline:
                 if mapped_items:
                     self._check_memory(f"text_encoder before {shard}")
                     text_model.load_weights(mapped_items, strict=False)
-                    mx.eval(text_model.parameters())
+                    self._eval_mlx(mx, text_model.parameters(), phase=f"text_encoder {shard}")
                     loaded_keys.update(key for key, _ in mapped_items)
                     self._check_memory(f"text_encoder after {shard}")
                 del w, mapped_items
@@ -656,19 +668,19 @@ class LTX23MLXPipeline:
                 )
 
             text_model.eval()
-            mx.eval(text_model.parameters())
+            self._eval_mlx(mx, text_model.parameters(), phase="text_encoder parameters")
 
             # Run text encoding
             input_ids_mx = mx.array(input_ids).reshape(1, -1)
             hidden_states = text_model(input_ids_mx)
-            mx.eval(hidden_states)
+            self._eval_mlx(mx, hidden_states, phase="text_encoder hidden states")
 
             # Pool embeddings (mean pooling) -> (1, hidden_size)
             pooled = hidden_states.mean(axis=1)
 
             # Project through PixArtAlphaTextProjection
             context_emb = self.text_proj(pooled)
-            mx.eval(context_emb)
+            self._eval_mlx(mx, context_emb, phase="text_encoder context projection")
 
             # Clean up text encoder
             del text_model, hidden_states, pooled, input_ids_mx
@@ -677,8 +689,8 @@ class LTX23MLXPipeline:
             mx.clear_cache()
 
             return context_emb
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def init_latents(self, *, seed: int, width: int, height: int, frames: int) -> Any:
@@ -702,11 +714,11 @@ class LTX23MLXPipeline:
                 "latent_init tensor",
             )
             latents = mx.random.normal((1, c, frames, latent_h, latent_w))
-            mx.eval(latents)
+            self._eval_mlx(mx, latents, phase="latent_init")
             self._check_memory("latent_init after")
             return latents
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
@@ -776,7 +788,7 @@ class LTX23MLXPipeline:
 
             # Forward pass → velocity prediction
             velocity, _ = self.model(video=modality, audio=None)
-            mx.eval(velocity)
+            self._eval_mlx(mx, velocity, phase=f"denoise {step_index + 1}/{steps} velocity")
 
             # Velocity → denoised (x0): x0 = latent - timestep * velocity
             sigma_f32 = mx.array(sigma, dtype=mx.float32)
@@ -785,7 +797,7 @@ class LTX23MLXPipeline:
             x0_f32 = latents_flat_f32 - timesteps_f32 * velocity.astype(mx.float32)
             denoised = mx.reshape(mx.transpose(x0_f32, (0, 2, 1)), (b, c, f, h, w))
 
-            mx.eval(denoised)
+            self._eval_mlx(mx, denoised, phase=f"denoise {step_index + 1}/{steps} denoised")
 
             # Euler step
             if sigma_next > 0:
@@ -794,12 +806,12 @@ class LTX23MLXPipeline:
             else:
                 next_latents = denoised
 
-            mx.eval(next_latents)
+            self._eval_mlx(mx, next_latents, phase=f"denoise {step_index + 1}/{steps} next_latents")
             next_latents = next_latents.astype(dtype)
             self._check_memory(f"denoise {step_index + 1}/{steps} after")
             return next_latents
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def decode(self, latents: Any) -> Any:
@@ -850,12 +862,12 @@ class LTX23MLXPipeline:
             if upscaler_path.exists():
                 self._check_memory("upsampler_load before")
                 upsampler, _ = load_upsampler(str(upscaler_path))
-                mx.eval(upsampler.parameters())
+                self._eval_mlx(mx, upsampler.parameters(), phase="upsampler parameters")
                 self._check_memory("upsampler_load after")
 
                 self._check_directory_load(vae_decoder_dir, "read upsampler_vae_stats")
                 vae_temp = VideoDecoder.from_pretrained(str(vae_decoder_dir))
-                mx.eval(vae_temp.parameters())
+                self._eval_mlx(mx, vae_temp.parameters(), phase="upsampler vae stats")
                 self._check_memory("upsampler_vae_stats after")
 
                 latents = upsample_latents(
@@ -864,7 +876,7 @@ class LTX23MLXPipeline:
                     vae_temp.per_channel_statistics.mean,
                     vae_temp.per_channel_statistics.std,
                 )
-                mx.eval(latents)
+                self._eval_mlx(mx, latents, phase="upsample_latents")
                 self._check_memory("upsample_latents after")
                 del upsampler, vae_temp
                 mx.clear_cache()
@@ -873,12 +885,12 @@ class LTX23MLXPipeline:
             self._check_directory_load(vae_decoder_dir, "read vae_decoder")
             self._check_memory("vae_load before")
             vae = VideoDecoder.from_pretrained(str(vae_decoder_dir))
-            mx.eval(vae.parameters())
+            self._eval_mlx(mx, vae.parameters(), phase="vae parameters")
             self._check_memory("vae_load after")
 
             self._check_host_allocation(self.frames * self.height * self.width * 3 * 4 * 4, "vae output tensor")
             video = vae(latents)
-            mx.eval(video)
+            self._eval_mlx(mx, video, phase="vae video")
             self._check_memory("vae_forward after")
 
             # 4. Post-process: (B, 3, T, H, W) → (T, H, W, 3) uint8
@@ -899,8 +911,8 @@ class LTX23MLXPipeline:
             gc.collect()
             self._check_memory("vae_decode after")
             return frames
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
@@ -966,8 +978,8 @@ class LTX23MLXPipeline:
             save_video(video, str(output_path), fps=self.fps)
             self._check_memory("file_write after")
             return output_path
-        except Exception:
-            _cleanup_loaded_runtime_after_error()
+        except Exception as exc:
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
 
@@ -1012,7 +1024,12 @@ def _normalize_video_frames(np: Any, frames: Any) -> Any:
     return frames.astype(np.uint8, copy=False)
 
 
-def _cleanup_loaded_runtime_after_error() -> None:
+def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> None:
+    if exc is not None:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        if isinstance(exc, RuntimeMemoryAbort):
+            return
     try:
         from fastgen_profiler.mlx_guard import mlx_cleanup
 

@@ -665,6 +665,30 @@ class TestConfigureMlxResourceLimits:
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_wired_limit_set_failure_fails_closed_after_mlx_import(self, monkeypatch):
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
+        monkeypatch.setenv("FASTGEN_MLX_WIRED_LIMIT_GB", "10")
+        monkeypatch.setattr(mx, "set_memory_limit", lambda value: 0)
+        monkeypatch.setattr(mx, "set_cache_limit", lambda value: 0)
+        monkeypatch.setattr(mx, "set_wired_limit", lambda value: (_ for _ in ()).throw(RuntimeError("wired failed")))
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        with pytest.raises(MemoryGuardError, match="failed to set MLX wired memory limit"):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=None,
+                ),
+                label="wired-fail",
+            )
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_mlx_import_failure_runs_cleanup(self, monkeypatch):
         monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
         sys.modules.pop("mlx", None)
@@ -1813,6 +1837,53 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 frames=4,
                 steps=1,
             ).synchronize(object())
+
+        assert cleanup_calls == ["clear", "clear"]
+
+    def test_adapter_phase_eval_failure_aborts_and_cleans_up(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        cleanup_calls: list[str] = []
+        fake_mx = types.SimpleNamespace(
+            eval=lambda *args: (_ for _ in ()).throw(RuntimeError("metal eval failed")),
+            clear_cache=lambda: cleanup_calls.append("clear"),
+            random=types.SimpleNamespace(seed=lambda seed: None, normal=lambda shape: object()),
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        ltx = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        ltx.model = object()
+        ltx.config = types.SimpleNamespace(in_channels=128)
+        ltx._mlx_runtime_ready = True
+        ltx._check_memory = lambda phase: None  # type: ignore[method-assign]
+        ltx._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="ltx2.3 latent_init"):
+            ltx.init_latents(seed=1, width=256, height=256, frames=4)
+
+        wan = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        wan.mx = fake_mx
+        wan.latent_shape = (16, 1, 1, 1)
+        wan._check_memory = lambda phase: None  # type: ignore[method-assign]
+        wan._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="wan2.2 latent_init"):
+            wan.init_latents(seed=1, width=256, height=256, frames=4)
 
         assert cleanup_calls == ["clear", "clear"]
 
