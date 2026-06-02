@@ -27,6 +27,8 @@ _MAX_PRELOAD_SCAN_FILES = 10_000
 _MAX_DENOISE_STEPS = 512
 _MAX_FILTERED_WEIGHT_ITEMS = 100_000
 _MAX_PARAMETER_NAMES = 100_000
+_MAX_CONFIG_JSON_ITEMS = 10_000
+_MAX_CONFIG_JSON_DEPTH = 32
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "", *, label: str = "parameters") -> set[str]:
@@ -1134,7 +1136,37 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
         raise RuntimeMemoryAbort(
             f"LTX2.3 {label} at {path} must be a JSON object; refusing to construct MLX model"
         )
+    _assert_bounded_json_structure(config, label=label)
     return config
+
+
+def _assert_bounded_json_structure(value: Any, *, label: str) -> None:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited_items = 0
+    while stack:
+        current, depth = stack.pop()
+        if depth > _MAX_CONFIG_JSON_DEPTH:
+            _raise_runtime_abort(
+                f"LTX2.3 {label} JSON nesting exceeds safe depth {_MAX_CONFIG_JSON_DEPTH}; "
+                "refusing unbounded config traversal"
+            )
+        if isinstance(current, dict):
+            visited_items += len(current)
+            if visited_items > _MAX_CONFIG_JSON_ITEMS:
+                _raise_runtime_abort(
+                    f"LTX2.3 {label} JSON structure exceeds safe item limit "
+                    f"{_MAX_CONFIG_JSON_ITEMS}; refusing unbounded config traversal"
+                )
+            stack.extend((item, depth + 1) for item in current.values())
+            continue
+        if isinstance(current, list):
+            visited_items += len(current)
+            if visited_items > _MAX_CONFIG_JSON_ITEMS:
+                _raise_runtime_abort(
+                    f"LTX2.3 {label} JSON structure exceeds safe item limit "
+                    f"{_MAX_CONFIG_JSON_ITEMS}; refusing unbounded config traversal"
+                )
+            stack.extend((item, depth + 1) for item in current)
 
 
 def _recursive_safetensor_size(path: Path, phase: str) -> int:

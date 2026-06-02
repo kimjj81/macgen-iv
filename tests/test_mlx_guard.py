@@ -2461,6 +2461,40 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         limits.assert_not_called()
 
+    def test_ltx23_transformer_config_rejects_too_many_json_items_before_mlx_limits(self, tmp_path):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import _read_bounded_json_config
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {f"key_{index}": index for index in range(ltx23_mlx_adapter._MAX_CONFIG_JSON_ITEMS + 1)}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="safe item limit"):
+                _read_bounded_json_config(config_path, "preflight transformer config")
+
+        limits.assert_not_called()
+
+    def test_ltx23_transformer_config_rejects_deep_json_before_mlx_limits(self, tmp_path):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import _read_bounded_json_config
+
+        value: object = 0
+        for _ in range(ltx23_mlx_adapter._MAX_CONFIG_JSON_DEPTH + 1):
+            value = {"nested": value}
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="safe depth"):
+                _read_bounded_json_config(config_path, "preflight transformer config")
+
+        limits.assert_not_called()
+
     def test_ltx23_load_model_rejects_unsafe_structural_config_before_mlx_limits(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -7314,6 +7348,40 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
             _load_raw_config_for_preflight(config_path)
+
+    def test_wan22_raw_config_rejects_too_many_json_items_before_mlx_limits(self, tmp_path):
+        from fastgen_profiler.backends import wan22_mlx_adapter
+        from fastgen_profiler.backends.wan22_mlx_adapter import _load_raw_config_for_preflight
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {f"key_{index}": index for index in range(wan22_mlx_adapter._MAX_CONFIG_JSON_ITEMS + 1)}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="safe item limit"):
+                _load_raw_config_for_preflight(config_path)
+
+        limits.assert_not_called()
+
+    def test_wan22_raw_config_rejects_deep_json_before_mlx_limits(self, tmp_path):
+        from fastgen_profiler.backends import wan22_mlx_adapter
+        from fastgen_profiler.backends.wan22_mlx_adapter import _load_raw_config_for_preflight
+
+        value: object = 0
+        for _ in range(wan22_mlx_adapter._MAX_CONFIG_JSON_DEPTH + 1):
+            value = {"nested": value}
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="safe depth"):
+                _load_raw_config_for_preflight(config_path)
+
+        limits.assert_not_called()
 
     def test_ltx23_text_encoder_helper_is_local_first_by_default(self, tmp_path):
         from fastgen_profiler.backends.ltx23_text_encoder_download import ensure_text_encoder
