@@ -5102,6 +5102,71 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_ltx23_decode_runtime_abort_from_upsampled_shape_runs_cleanup(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        vae_decoder_dir = tmp_path / "vae" / "decoder"
+        vae_decoder_dir.mkdir(parents=True)
+        (vae_decoder_dir / "decoder.safetensors").write_bytes(b"x")
+        (tmp_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors").write_bytes(b"x")
+
+        class FakeVAE:
+            per_channel_statistics = types.SimpleNamespace(mean=0, std=1)
+
+            def parameters(self):
+                return object()
+
+            def __call__(self, latents):
+                raise AssertionError("VAE forward must not run after invalid upsampled latent shape")
+
+        class FakeVideoDecoder:
+            @classmethod
+            def from_pretrained(cls, path):
+                return FakeVAE()
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
+
+        class FakeUpsampledLatents:
+            shape = (1, 128, 4, "64", 64)
+
+        class FakeUpsampler:
+            def parameters(self):
+                return object()
+
+        fake_mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+        decoder_module = types.ModuleType("mlx_video.models.ltx_2.video_vae.decoder")
+        decoder_module.VideoDecoder = FakeVideoDecoder
+        upsampler_module = types.ModuleType("mlx_video.models.ltx_2.upsampler")
+        upsampler_module.load_upsampler = lambda path: (FakeUpsampler(), None)
+        upsampler_module.upsample_latents = lambda *args: FakeUpsampledLatents()
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, decoder_module.__name__, decoder_module)
+        monkeypatch.setitem(sys.modules, upsampler_module.__name__, upsampler_module)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="not a finite integer shape"):
+            pipe.decode(FakeLatents())
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_ltx23_decode_rejects_unexpected_frame_shape_before_numpy(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 

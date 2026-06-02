@@ -884,7 +884,12 @@ def _flat_file_size_total(path: Path, phase: str) -> int:
 
 
 def _raise_runtime_abort(message: str) -> None:
-    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
+
+    try:
+        mlx_cleanup()
+    except Exception:
+        pass
 
     raise RuntimeMemoryAbort(message)
 
