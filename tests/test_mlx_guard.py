@@ -2987,6 +2987,37 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert calls == ["preflight transformer", "system", "budget", "limits"]
 
+    def test_mlx_adapters_reject_single_file_model_paths_before_import(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        model_file = tmp_path / "wan_v2.2_5b_ti2v_q8p.ckpt"
+        model_file.write_bytes(b"ckpt")
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "mlx" or name.startswith("mlx.") or name.startswith("mlx_video"):
+                raise AssertionError("single-file model path must be rejected before MLX imports")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        for pipeline_cls, model_name in (
+            (Wan22MLXPipeline, "Wan2.2"),
+            (LTX23MLXPipeline, "LTX2.3"),
+        ):
+            pipe = pipeline_cls(
+                model_path=model_file,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+
+            with pytest.raises(MemoryGuardError, match=f"{model_name} model path is a single file"):
+                pipe.load_model()
+
     def test_ltx23_load_model_preflights_config_latent_shape_before_mlx_limits(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -5964,13 +5995,18 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
         pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128, cross_attention_dim=128)
+        pipe.context_emb = types.SimpleNamespace(shape=(1, 128))
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
 
         with patch(
             "fastgen_profiler.mlx_guard.check_runtime_memory",
             side_effect=RuntimeMemoryAbort("stop before ltx work"),
         ):
             with pytest.raises(RuntimeMemoryAbort, match="stop before ltx work"):
-                pipe.denoise_step(object(), step_index=0, steps=1, guidance=1.0, cache="none")
+                pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
     @pytest.mark.parametrize(
         ("step_index", "steps"),
@@ -6741,10 +6777,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         vae_decoder_dir = tmp_path / "vae" / "decoder"
         vae_decoder_dir.mkdir(parents=True)
         (vae_decoder_dir / "decoder.safetensors").write_bytes(b"x")
-        monkeypatch.setattr(
-            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
-            lambda name: None if name == "mlx_video" else object(),
-        )
+        monkeypatch.setattr("fastgen_profiler.backends.ltx23_mlx_adapter._dependency_available", lambda name: False)
 
         pipe = LTX23MLXPipeline(
             model_path=tmp_path,

@@ -571,6 +571,7 @@ class LTX23MLXPipeline:
 
     def load_model(self) -> dict[str, object]:
         self._fail_if_runtime_failed("load_model")
+        _check_supported_model_directory(self.model_path, "LTX2.3")
         if self.model is not None:
             raise RuntimeError(
                 "LTX2.3 MLX model is already loaded in this pipeline; create a fresh "
@@ -1473,6 +1474,17 @@ def _flat_safetensor_names(path: Path, phase: str) -> list[str]:
     if abort is not None:
         raise abort
     return sorted(names)
+
+
+def _check_supported_model_directory(path: Path, model_name: str) -> None:
+    if path.is_file():
+        from fastgen_profiler.mlx_guard import MemoryGuardError
+
+        raise MemoryGuardError(
+            f"{model_name} model path is a single file, not a converted MLX model directory: {path}. "
+            "Convert or select a directory containing config.json, model.safetensors, tokenizer, "
+            "and required local text/VAE weights before loading."
+        )
 
 
 def _runtime_abort(message: str) -> BaseException:
