@@ -320,12 +320,39 @@ def run_single(steps: int):
 
 
 def _check_decoded_video_shape(video, *, label: str) -> None:
-    actual = tuple(getattr(video, "shape", ()))
+    actual = _bounded_shape_tuple(video, expected_rank=4, label=label)
     expected = (FRAMES, HEIGHT, WIDTH, 3)
     if actual != expected:
         raise RuntimeMemoryAbort(
             f"decoded benchmark video must have shape {expected}, got {actual} for {label}"
         )
+
+
+def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        raise RuntimeMemoryAbort(
+            f"decoded benchmark video has no shape for {label}; refusing unbounded shape inspection"
+        )
+    dims: list[int] = []
+    try:
+        iterator = iter(shape)
+    except TypeError as exc:
+        raise RuntimeMemoryAbort(
+            f"decoded benchmark video shape is not iterable for {label}; refusing unbounded shape inspection"
+        ) from exc
+    for dim in iterator:
+        if len(dims) >= expected_rank:
+            raise RuntimeMemoryAbort(
+                f"decoded benchmark video shape rank exceeds {expected_rank} for {label}; "
+                "refusing unbounded shape inspection"
+            )
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            raise RuntimeMemoryAbort(
+                f"decoded benchmark video shape contains non-integer dimension {dim!r} for {label}"
+            )
+        dims.append(dim)
+    return tuple(dims)
 
 
 def _video_frame_budget_bytes(video: Any, *, multiplier: int) -> int:

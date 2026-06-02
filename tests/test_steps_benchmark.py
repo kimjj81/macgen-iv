@@ -828,6 +828,33 @@ def test_steps_benchmark_rejects_unexpected_video_shape_before_png_save(tmp_path
         module.run_single(1)
 
 
+def test_steps_benchmark_rejects_unbounded_video_shape_metadata(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_unbounded_shape_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    monkeypatch.setenv("FASTGEN_STEPS_WIDTH", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_HEIGHT", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_FRAMES", "2")
+    spec.loader.exec_module(module)
+
+    class Shape:
+        def __iter__(self):
+            yield from (2, 4, 4, 3, 1)
+            raise AssertionError("shape guard must not consume beyond expected rank")
+
+    class FakeVideo:
+        shape = Shape()
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="shape rank"):
+        module._check_decoded_video_shape(FakeVideo(), label="steps_1")
+
+
 def test_steps_benchmark_heavy_guard_error_returns_nonzero(tmp_path, monkeypatch):
     import importlib.util
 
