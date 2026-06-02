@@ -245,7 +245,7 @@ def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate
     """
     candidates: list[ModelCandidate] = []
     try:
-        entries = list(root.iterdir())
+        entries = root.iterdir()
     except OSError:
         return []
 
@@ -273,18 +273,23 @@ def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate
 def _markers(path: Path) -> tuple[str, ...]:
     markers: list[str] = []
     try:
-        children = list(path.iterdir())
+        children = path.iterdir()
     except OSError:
         return ()
 
-    names = {child.name for child in children if child.is_file()}
-    for marker in MODEL_MARKER_FILES:
-        if marker in names:
-            markers.append(marker)
-
     for child in children:
-        if child.is_file() and child.suffix.lower() in MODEL_MARKER_SUFFIXES:
-            markers.append(f"*{child.suffix.lower()}")
+        if not child.is_file():
+            continue
+        if child.name in MODEL_MARKER_FILES:
+            markers.append(child.name)
+        suffix = child.suffix.lower()
+        if suffix in MODEL_MARKER_SUFFIXES:
+            markers.append(f"*{suffix}")
+        if set(MODEL_MARKER_FILES).issubset(markers) and all(
+            f"*{suffix}" in markers for suffix in MODEL_MARKER_SUFFIXES
+        ):
+            break
+
     return tuple(sorted(set(markers)))
 
 

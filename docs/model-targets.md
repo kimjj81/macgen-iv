@@ -50,6 +50,13 @@ Discovery markers:
 
 `*.gguf` files are not treated as video generation model candidates by default because they commonly represent LM Studio/Ollama LLM models. Model-specific discovery is strict: `--model wan2.2` only lists Wan candidates, and `--model ltx2.3` only lists LTX candidates.
 
+Runtime adapters are stricter than discovery. Wan2.2 and LTX2.3 MLX runs must
+find local config files before importing MLX or `mlx_video` model modules, so
+model shape and structural memory budgets can be checked before Metal work
+starts.
+LTX2.3 runtime also requires local text projection weights and VAE decoder
+`.safetensors` files before text encoding or decode can initialize MLX.
+
 The discovery layer records selected `model_id`, `model_path`, and `model_source_root` in JSONL output. Family matching is best-effort from path text.
 
 Import scans known app roots, then replaces `FASTGEN_MODEL_DIRS` with the Wan2.2/LTX2.3 generation model candidate directories found under those roots. Existing unrelated `.env` keys and comments are preserved, but stale model directory entries are removed. If no generation model candidates exist, import exits with an error and leaves `.env` unchanged.

@@ -35,6 +35,12 @@ Denoising should support per-step timing so regressions and hot spots can be loc
 
 MLX operations can be lazy or asynchronous depending on the operation path. Phase and step timings must synchronize before stopping the timer when needed, for example with `mx.eval(...)` on relevant outputs.
 
+## Memory Safety
+
+MLX/Metal benchmarks must follow `docs/memory-safety.md`. Memory guard failures
+should be recorded as benchmark errors instead of allowing a run to continue
+under unsafe memory pressure.
+
 ## Output
 
 Benchmark results are written to JSONL. Each line represents one phase or step measurement record. Records are grouped by `run_id`.

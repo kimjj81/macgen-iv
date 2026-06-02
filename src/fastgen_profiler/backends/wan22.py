@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from .mlx import MLXBackend
+from typing import Any
 
 
-class Wan22Backend(MLXBackend):
-    name = "wan2.2"
+def __getattr__(name: str) -> Any:
+    if name != "Wan22Backend":
+        raise AttributeError(name)
+    from .mlx import MLXBackend
+
+    class Wan22Backend(MLXBackend):
+        name = "wan2.2"
+
+    return Wan22Backend
+
+
+__all__ = ["Wan22Backend"]

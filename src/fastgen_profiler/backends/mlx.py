@@ -19,6 +19,7 @@ logger = logging.getLogger("fastgen_profiler.mlx_backend")
 
 class MLXBackend(BackendAdapter):
     name = "mlx"
+    scaffold_only = True
 
     def run(
         self,
@@ -47,8 +48,11 @@ class MLXBackend(BackendAdapter):
                         check_runtime_memory(
                             label=f"{config.model} step {step_index}/{config.steps}"
                         )
-                    except ImportError:
-                        pass  # mlx_guard not available (unlikely)
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "mlx_guard unavailable before MLX runtime watchdog; "
+                            "refusing to continue without memory checks"
+                        ) from exc
 
                     records.append(
                         self.record(

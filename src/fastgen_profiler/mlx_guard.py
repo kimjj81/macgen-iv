@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,13 +27,14 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 # Minimum free memory (bytes) required before starting a run.
-# M4 Max with 128GB: 4GB headroom. Scale down for smaller configs.
-DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3  # 4 GB
+# Keep this aligned with the system reserve used for host allocations.
+DEFAULT_MIN_FREE_BYTES = 8 * 1024 ** 3  # 8 GB
 
-# Maximum consecutive runs before forcing a process restart recommendation.
-# After this many runs, accumulated Metal/MLX resource leaks may destabilize
-# the system. The caller should exit and let the orchestrator respawn.
-MAX_CONSECUTIVE_RUNS = 8
+# Maximum MLX runs allowed in one process before forcing a restart.
+# MLX/Metal resource state can survive Python-level cleanup, so the safe
+# default is one heavy run per process. Suite runners should respawn children
+# instead of reusing a process for multiple model executions.
+MAX_CONSECUTIVE_RUNS = 1
 
 # Seconds to sleep between runs for thermal/Metal cooldown.
 COOLDOWN_SECONDS = 5
@@ -42,10 +45,11 @@ MAX_SWAP_FILES = 20
 # Memory pressure fraction threshold (0.0-1.0) for runtime watchdog.
 # Above this, the current step loop is aborted to prevent kernel panic.
 RUNTIME_PRESSURE_ABORT_THRESHOLD = 0.92
+RUNTIME_MLX_LIMIT_ABORT_FRACTION = 0.92
 
 # Free memory threshold for runtime watchdog.
-# Below this, we abort the current run.
-RUNTIME_MIN_FREE_BYTES = 2 * 1024 ** 3  # 2 GB
+# Below this, abort before unified memory pressure can destabilize the OS.
+RUNTIME_MIN_FREE_BYTES = 4 * 1024 ** 3  # 4 GB
 
 # Keep memory outside MLX so the OS remains responsive. MLX's default memory
 # limit can be larger than the device working set, so profiler runs set an
@@ -53,6 +57,8 @@ RUNTIME_MIN_FREE_BYTES = 2 * 1024 ** 3  # 2 GB
 DEFAULT_SYSTEM_RESERVE_BYTES = 8 * 1024 ** 3  # 8 GB
 DEFAULT_MLX_MEMORY_FRACTION = 0.80
 DEFAULT_MLX_CACHE_LIMIT_BYTES = 1 * 1024 ** 3  # 1 GB
+MIN_MLX_MEMORY_LIMIT_BYTES = 512 * 1024 ** 2  # 512 MiB
+DEFAULT_MAX_PROMPT_CHARS = 8192
 
 # Adaptive batch sizing defaults.
 ADAPTIVE_INITIAL_FRAMES = 5
@@ -62,6 +68,8 @@ ADAPTIVE_HEADROOM_THRESHOLD = 0.3  # grow if >30% memory free after probe
 ADAPTIVE_SHRINK_THRESHOLD = 0.15   # shrink if <15% memory free after probe
 
 logger = logging.getLogger("fastgen_profiler.mlx_guard")
+_MLX_IMPORT_PROBE_ENV = "FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE"
+_current_mlx_memory_limit_bytes: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -77,15 +85,25 @@ def _vm_stat() -> dict[str, int]:
             text=True,
             timeout=10,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return {}
 
     pages: dict[str, int] = {}
     for line in result.stdout.splitlines():
+        if "page size of" in line.lower():
+            parts = line.replace(".", "").split()
+            for index, part in enumerate(parts):
+                if part == "of" and index + 1 < len(parts):
+                    try:
+                        pages["__page_size__"] = int(parts[index + 1].replace(",", ""))
+                    except ValueError:
+                        pass
+                    break
+            continue
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        value = value.strip().rstrip(".")
+        value = value.strip().rstrip(".").replace(",", "")
         try:
             pages[key.strip()] = int(value)
         except ValueError:
@@ -98,7 +116,7 @@ def free_memory_bytes() -> int | None:
     pages = _vm_stat()
     if not pages:
         return None
-    page_size = 16384  # Apple Silicon ARM64 page size
+    page_size = pages.get("__page_size__", 16384)
     free = pages.get("Pages free", 0)
     inactive = pages.get("Pages inactive", 0)
     return (free + inactive) * page_size
@@ -117,7 +135,7 @@ def total_memory_bytes() -> int | None:
             timeout=5,
         )
         return int(result.stdout.strip())
-    except (OSError, subprocess.CalledProcessError, ValueError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
         return None
 
 
@@ -152,7 +170,7 @@ def memory_pressure_fraction() -> float | None:
                     return used_pct / 100.0
                 except ValueError:
                     continue
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         pass
     return None
 
@@ -188,10 +206,22 @@ class SystemSnapshot:
 
 def system_snapshot() -> SystemSnapshot:
     """Capture current system memory state."""
-    free = free_memory_bytes()
-    total = total_memory_bytes()
-    pressure = memory_pressure_fraction()
-    swap = swap_file_count()
+    try:
+        free = free_memory_bytes()
+    except Exception:
+        free = None
+    try:
+        total = total_memory_bytes()
+    except Exception:
+        total = None
+    try:
+        pressure = memory_pressure_fraction()
+    except Exception:
+        pressure = None
+    try:
+        swap = swap_file_count()
+    except Exception:
+        swap = None
 
     free_frac = None
     if free is not None and total is not None and total > 0:
@@ -215,25 +245,41 @@ def mlx_cleanup() -> dict[str, object]:
 
     Returns a status dict with memory info for logging.
     """
-    before_free = free_memory_bytes()
+    before_free = None
+    mlx_loaded = False
+    mlx_cache_cleared = False
+    mlx_cleanup_error = None
+    memory_telemetry_error = None
+
+    try:
+        before_free = free_memory_bytes()
+    except Exception:
+        memory_telemetry_error = "failed to read free memory before cleanup"
 
     # Force Python garbage collection (multiple passes)
     for _ in range(3):
         gc.collect()
 
-    # Clear MLX Metal cache
-    try:
-        import mlx.core as mx
-        mx.clear_cache()
-        # Synchronize to flush pending GPU commands
-        mx.eval(mx.array(0))
-    except Exception:
-        pass
+    # Clear MLX Metal cache only if this process has already initialized MLX.
+    # Cleanup must not open a fresh Metal runtime while handling a memory abort.
+    mx = sys.modules.get("mlx.core")
+    if mx is not None:
+        mlx_loaded = True
+        try:
+            mx.clear_cache()
+            mlx_cache_cleared = True
+        except Exception:
+            mlx_cleanup_error = "failed to clear MLX cache"
 
     # Another GC pass after MLX cleanup
     gc.collect()
 
-    after_free = free_memory_bytes()
+    after_free = None
+    try:
+        after_free = free_memory_bytes()
+    except Exception:
+        if memory_telemetry_error is None:
+            memory_telemetry_error = "failed to read free memory after cleanup"
 
     return {
         "free_before_gb": round(before_free / 1e9, 2) if before_free else None,
@@ -241,6 +287,10 @@ def mlx_cleanup() -> dict[str, object]:
         "freed_gb": round((after_free - before_free) / 1e9, 2)
         if (before_free is not None and after_free is not None)
         else None,
+        "mlx_loaded": mlx_loaded,
+        "mlx_cache_cleared": mlx_cache_cleared,
+        "mlx_cleanup_error": mlx_cleanup_error,
+        "memory_telemetry_error": memory_telemetry_error,
     }
 
 
@@ -252,17 +302,71 @@ def _env_gb_to_bytes(name: str) -> int | None:
         gb = float(value)
     except ValueError as exc:
         raise MemoryGuardError(f"{name} must be a number of GB, got {value!r}") from exc
-    if gb <= 0:
-        raise MemoryGuardError(f"{name} must be greater than zero")
-    return int(gb * 1024 ** 3)
+    if not math.isfinite(gb) or gb <= 0:
+        raise MemoryGuardError(f"{name} must be a finite number of GB greater than zero")
+    bytes_value = int(gb * 1024 ** 3)
+    if bytes_value <= 0:
+        raise MemoryGuardError(f"{name} is too small to represent at byte precision")
+    return bytes_value
+
+
+def _system_reserve_bytes(default: int = DEFAULT_SYSTEM_RESERVE_BYTES) -> int:
+    override = _env_gb_to_bytes("FASTGEN_SYSTEM_RESERVE_GB")
+    if override is None:
+        return default
+    return max(default, override)
 
 
 def _default_mlx_memory_limit(total_bytes: int | None) -> int | None:
     if total_bytes is None:
         return None
-    reserved_limit = max(0, total_bytes - DEFAULT_SYSTEM_RESERVE_BYTES)
+    reserved_limit = total_bytes - _system_reserve_bytes()
     fraction_limit = int(total_bytes * DEFAULT_MLX_MEMORY_FRACTION)
-    return max(1 * 1024 ** 3, min(reserved_limit, fraction_limit))
+    return min(reserved_limit, fraction_limit)
+
+
+def _free_memory_mlx_limit(free_bytes: int | None) -> int | None:
+    if free_bytes is None:
+        return None
+    return free_bytes - _system_reserve_bytes()
+
+
+def _validate_pre_run_snapshot(
+    snap: SystemSnapshot,
+    *,
+    label: str,
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    max_swap_files: int = MAX_SWAP_FILES,
+) -> None:
+    """Fail closed before any MLX import or allocator probe."""
+    if sys.platform == "darwin" and snap.free_bytes is None:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot read vm_stat free memory. "
+            "Refusing to start an MLX/Metal run without free memory telemetry."
+        )
+    if sys.platform == "darwin" and snap.swap_files is None:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot read macOS swap file state. "
+            "Refusing to start an MLX/Metal run without swap telemetry."
+        )
+
+    if snap.free_bytes is not None and snap.free_bytes < min_free_bytes:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: only {round(snap.free_bytes / 1e9, 1)}GB free, "
+            f"need >= {round(min_free_bytes / 1e9, 1)}GB before importing MLX/Metal."
+        )
+
+    if snap.pressure is not None and snap.pressure > 0.95:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: pressure at {round(snap.pressure * 100, 0)}%, "
+            "system is near OOM. Refusing to import MLX/Metal."
+        )
+
+    if snap.swap_files is not None and snap.swap_files > max_swap_files:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: {snap.swap_files} swap files active "
+            f"(max {max_swap_files}). Refusing to import MLX/Metal while heavily swapping."
+        )
 
 
 def configure_mlx_resource_limits(
@@ -278,15 +382,45 @@ def configure_mlx_resource_limits(
       FASTGEN_MLX_WIRED_LIMIT_GB
     """
     snap = snapshot or system_snapshot()
+    _validate_pre_run_snapshot(snap, label=label)
+    default_memory_limit = _default_mlx_memory_limit(snap.total_bytes)
+    free_memory_limit = _free_memory_mlx_limit(snap.free_bytes)
+    if default_memory_limit is None and sys.platform == "darwin":
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot derive MLX memory limit because "
+            "total memory telemetry is unavailable. Refusing to trust explicit "
+            "allocator overrides without a system-reserve clamp; fix sysctl "
+            "hw.memsize access before starting MLX/Metal."
+        )
+    if free_memory_limit is None and sys.platform == "darwin":
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot derive MLX memory limit because "
+            "free memory telemetry is unavailable. Refusing to import MLX/Metal "
+            "without preserving the system reserve from current headroom."
+        )
     memory_limit = _env_gb_to_bytes("FASTGEN_MLX_MEMORY_LIMIT_GB")
     if memory_limit is None:
-        memory_limit = _default_mlx_memory_limit(snap.total_bytes)
+        memory_limit = default_memory_limit
+    elif default_memory_limit is not None:
+        memory_limit = min(memory_limit, default_memory_limit)
+    if memory_limit is not None and free_memory_limit is not None:
+        memory_limit = min(memory_limit, free_memory_limit)
+    if memory_limit is not None and memory_limit < MIN_MLX_MEMORY_LIMIT_BYTES:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: safe MLX memory limit would be "
+            f"{memory_limit / 1e9:.2f}GB, below minimum "
+            f"{MIN_MLX_MEMORY_LIMIT_BYTES / 1e9:.2f}GB after preserving system reserve."
+        )
     cache_limit = _env_gb_to_bytes("FASTGEN_MLX_CACHE_LIMIT_GB")
     if cache_limit is None:
         cache_limit = DEFAULT_MLX_CACHE_LIMIT_BYTES
+    if memory_limit is not None:
+        cache_limit = min(cache_limit, memory_limit)
     wired_limit = _env_gb_to_bytes("FASTGEN_MLX_WIRED_LIMIT_GB")
     if wired_limit is None and memory_limit is not None and sys.platform == "darwin":
         wired_limit = memory_limit
+    elif wired_limit is not None and memory_limit is not None:
+        wired_limit = min(wired_limit, memory_limit)
 
     status: dict[str, object] = {
         "label": label,
@@ -299,9 +433,12 @@ def configure_mlx_resource_limits(
         "wired_limit_error": None,
     }
 
+    _probe_mlx_import(label)
+
     try:
         import mlx.core as mx
     except Exception as exc:
+        mlx_cleanup()
         raise MemoryGuardError(
             f"Memory guard [{label}]: cannot import mlx.core to set allocator limits"
         ) from exc
@@ -320,11 +457,55 @@ def configure_mlx_resource_limits(
             except Exception as exc:
                 status["wired_limit_error"] = str(exc)
     except Exception as exc:
+        mlx_cleanup()
         raise MemoryGuardError(
             f"Memory guard [{label}]: failed to set MLX memory limits: {exc}"
         ) from exc
 
+    global _current_mlx_memory_limit_bytes
+    _current_mlx_memory_limit_bytes = memory_limit
     return status
+
+
+def _probe_mlx_import(label: str) -> None:
+    """Check MLX/Metal availability in a child process before importing here."""
+    if _test_skip_mlx_import_probe_enabled():
+        return
+    code = (
+        "import mlx.core as mx\n"
+        "mx.set_cache_limit(0)\n"
+        "mx.clear_cache()\n"
+    )
+    env = dict(os.environ)
+    env[_MLX_IMPORT_PROBE_ENV] = "1"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot verify MLX/Metal availability: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: MLX/Metal is unavailable before run "
+            f"(probe exit {result.returncode})."
+        )
+
+
+def _test_skip_mlx_import_probe_enabled() -> bool:
+    """Allow MLX import probe bypass only inside pytest."""
+    current_test = os.environ.get("PYTEST_CURRENT_TEST", "")
+    return (
+        os.environ.get(_MLX_IMPORT_PROBE_ENV) == "1"
+        and "pytest" in sys.modules
+        and "::" in current_test
+        and current_test.endswith((" (setup)", " (call)", " (teardown)"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,10 +536,15 @@ def check_memory_guard(
         "min_free_gb": round(min_free_bytes / 1e9, 2),
     }
 
-    if sys.platform == "darwin" and snap.free_bytes is None and snap.pressure is None:
+    if sys.platform == "darwin" and snap.free_bytes is None:
         raise MemoryGuardError(
-            f"Memory guard [{label}]: cannot read vm_stat or memory_pressure. "
-            "Refusing to start an MLX/Metal run without memory telemetry."
+            f"Memory guard [{label}]: cannot read vm_stat free memory. "
+            "Refusing to start an MLX/Metal run without free memory telemetry."
+        )
+    if sys.platform == "darwin" and snap.swap_files is None:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot read macOS swap file state. "
+            "Refusing to start an MLX/Metal run without swap telemetry."
         )
 
     if snap.free_bytes is not None and snap.free_bytes < min_free_bytes:
@@ -398,7 +584,28 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
     Returns the snapshot for logging.
     Raises RuntimeMemoryAbort if the system is about to OOM.
     """
-    snap = system_snapshot()
+    _check_mlx_runtime_limit(label)
+    try:
+        snap = system_snapshot()
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
+            "during MLX/Metal run. Aborting because runtime memory state is unknown."
+        ) from exc
+
+    if sys.platform == "darwin" and snap.free_bytes is None:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read vm_stat free memory "
+            "during MLX/Metal run. Aborting because free memory telemetry is unavailable."
+        )
+    if sys.platform == "darwin" and snap.swap_files is None:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read macOS swap file state "
+            "during MLX/Metal run. Aborting because swap telemetry is unavailable."
+        )
 
     if snap.free_bytes is not None and snap.free_bytes < RUNTIME_MIN_FREE_BYTES:
         mlx_cleanup()
@@ -419,6 +626,32 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
     return snap
 
 
+def _check_mlx_runtime_limit(label: str) -> None:
+    if _current_mlx_memory_limit_bytes is None:
+        return
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
+        return
+    try:
+        active = int(mx.get_active_memory())
+        cache = int(mx.get_cache_memory())
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read MLX allocator memory "
+            "while a configured memory limit is active."
+        ) from exc
+    used = active + cache
+    threshold = int(_current_mlx_memory_limit_bytes * RUNTIME_MLX_LIMIT_ABORT_FRACTION)
+    if used >= threshold:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: MLX active+cache memory "
+            f"{used / 1e9:.1f}GB is above {RUNTIME_MLX_LIMIT_ABORT_FRACTION * 100:.0f}% "
+            f"of configured limit {_current_mlx_memory_limit_bytes / 1e9:.1f}GB."
+        )
+
+
 def check_host_allocation_headroom(
     required_bytes: int,
     *,
@@ -426,6 +659,7 @@ def check_host_allocation_headroom(
     reserve_bytes: int = DEFAULT_SYSTEM_RESERVE_BYTES,
 ) -> SystemSnapshot:
     """Abort before large CPU-side allocations when system headroom is tight."""
+    reserve_bytes = _system_reserve_bytes(reserve_bytes)
     snap = system_snapshot()
     required_with_reserve = required_bytes + reserve_bytes
     if snap.free_bytes is None:
@@ -461,9 +695,25 @@ def estimate_video_run_floor_bytes(
     high-channel latents, CFG duplication, denoise temporaries, and decoded
     host frames.
     """
-    latent_h = max(1, height // 8)
-    latent_w = max(1, width // 8)
-    cfg_factor = 2 if guidance > 1.0 else 1
+    for name, value in (("width", width), ("height", height), ("frames", frames)):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise MemoryGuardError(
+                f"Memory guard [shape budget]: {name} must be a positive integer, got {value!r}"
+            )
+    try:
+        guidance_value = float(guidance)
+    except (TypeError, ValueError) as exc:
+        raise MemoryGuardError(
+            f"Memory guard [shape budget]: guidance must be a finite number, got {guidance!r}"
+        ) from exc
+    if not math.isfinite(guidance_value):
+        raise MemoryGuardError(
+            f"Memory guard [shape budget]: guidance must be a finite number, got {guidance!r}"
+        )
+
+    latent_h = max(1, (height + 7) // 8)
+    latent_w = max(1, (width + 7) // 8)
+    cfg_factor = 2 if guidance_value > 1.0 else 1
     latent_channels = 128
     bytes_per_float = 4
     latent_bytes = frames * latent_h * latent_w * latent_channels * bytes_per_float
@@ -492,6 +742,85 @@ def check_run_allocation_budget(
     return {
         "shape_floor_gb": round(required / 1e9, 2),
         "free_gb": round(snap.free_bytes / 1e9, 2) if snap.free_bytes else None,
+    }
+
+
+def _max_prompt_chars() -> int:
+    raw = os.environ.get("FASTGEN_MAX_PROMPT_CHARS")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_MAX_PROMPT_CHARS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}") from exc
+    if value <= 0:
+        raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}")
+    return value
+
+
+def check_text_prompt_budget(
+    *,
+    prompt: str,
+    negative_prompt: str | None = None,
+    label: str = "",
+) -> dict[str, object]:
+    """Reject unexpectedly large text inputs before tokenizer/model allocation.
+
+    Tokenizers can allocate proportionally to raw text length before model-side
+    max token limits are applied. Keep this as a pre-tokenization gate so a
+    malformed CLI or script input cannot start a large host allocation.
+    """
+    max_chars = _max_prompt_chars()
+    negative = negative_prompt or ""
+    prompt_chars = len(prompt)
+    negative_chars = len(negative)
+    largest = max(prompt_chars, negative_chars)
+    if largest > max_chars:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: prompt text is {largest} chars, "
+            f"max {max_chars}. Refusing to tokenize oversized text input."
+        )
+
+    # Python stores text wider than one byte when needed, and tokenizers often
+    # copy buffers internally. This estimate is intentionally conservative.
+    required = (prompt_chars + negative_chars) * 16
+    check_host_allocation_headroom(required, label=f"{label} prompt text")
+    return {
+        "prompt_chars": prompt_chars,
+        "negative_prompt_chars": negative_chars,
+        "max_prompt_chars": max_chars,
+    }
+
+
+def check_token_sequence_budget(
+    *,
+    token_count: int,
+    max_tokens: int,
+    hidden_size: int,
+    label: str = "",
+) -> dict[str, object]:
+    """Reject oversized token sequences before text-encoder MLX arrays."""
+    if token_count <= 0:
+        raise MemoryGuardError(f"Memory guard [{label}]: token_count must be positive, got {token_count}")
+    if max_tokens <= 0:
+        raise MemoryGuardError(f"Memory guard [{label}]: max_tokens must be positive, got {max_tokens}")
+    if hidden_size <= 0:
+        raise MemoryGuardError(f"Memory guard [{label}]: hidden_size must be positive, got {hidden_size}")
+    if token_count > max_tokens:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: token sequence is {token_count} tokens, "
+            f"max {max_tokens}. Refusing to encode oversized text input."
+        )
+
+    # Hidden states are at least token_count * hidden_size * fp32 bytes.
+    # Use a multiplier for common temporary activations and projection buffers.
+    required = token_count * hidden_size * 4 * 4
+    check_host_allocation_headroom(required, label=f"{label} token hidden states")
+    return {
+        "token_count": token_count,
+        "max_tokens": max_tokens,
+        "hidden_size": hidden_size,
+        "token_hidden_state_floor_gb": round(required / 1e9, 2),
     }
 
 
@@ -739,9 +1068,9 @@ def reset_run_counter() -> None:
 def should_restart_process() -> bool:
     """Return True if this process has run enough times to risk instability.
 
-    After MAX_CONSECUTIVE_RUNS, MLX Metal resource leaks may accumulate
-    and trigger watchdog timeouts. The caller should exit with a special
-    code and let the orchestrator respawn a fresh process.
+    After MAX_CONSECUTIVE_RUNS, MLX Metal resource leaks may accumulate and
+    trigger watchdog timeouts. The caller must stop MLX work in this process
+    and let an orchestrator respawn a fresh process.
     """
     return _run_counter >= MAX_CONSECUTIVE_RUNS
 
@@ -759,15 +1088,38 @@ def inter_run_recovery(
     Returns combined status dict.
     Raises MemoryGuardError if memory is insufficient.
     """
+    check_memory_guard(min_free_bytes=min_free_bytes, label=label)
     cleanup_status = mlx_cleanup()
 
-    import time
     time.sleep(COOLDOWN_SECONDS)
 
     guard_status = check_memory_guard(min_free_bytes=min_free_bytes, label=label)
     limit_status = configure_mlx_resource_limits(label=label)
     guard_status.update(cleanup_status)
     guard_status.update(limit_status)
+    guard_status["run_number"] = run_counter() + 1
+    guard_status["should_restart"] = should_restart_process()
+
+    return guard_status
+
+
+def inter_run_system_recovery(
+    label: str = "",
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+) -> dict[str, object]:
+    """Run cleanup, cooldown, and system checks without importing MLX.
+
+    Use this in callers that have not yet completed model-local asset/config
+    preflight. Backend adapters should configure MLX allocator limits after
+    they know the local model structure is safe to load.
+    """
+    check_memory_guard(min_free_bytes=min_free_bytes, label=label)
+    cleanup_status = mlx_cleanup()
+
+    time.sleep(COOLDOWN_SECONDS)
+
+    guard_status = check_memory_guard(min_free_bytes=min_free_bytes, label=label)
+    guard_status.update(cleanup_status)
     guard_status["run_number"] = run_counter() + 1
     guard_status["should_restart"] = should_restart_process()
 

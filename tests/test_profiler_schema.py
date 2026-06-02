@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
+import sys
 
 from fastgen_profiler.backends import create_backend
-from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig
+from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig, machine_metadata
 from fastgen_profiler.profiler import Profiler
 
 
@@ -78,3 +80,22 @@ def test_profiler_records_required_fields_and_phases():
     assert all(record["model"] == "ltx2.3" for record in serialized)
     assert all(record["prompt_hash"] != "schema test" for record in serialized)
     assert all("python_version" in record["machine"] for record in serialized)
+
+
+def test_machine_metadata_does_not_import_mlx(monkeypatch):
+    sys.modules.pop("mlx", None)
+    sys.modules.pop("mlx.core", None)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name in {"mlx", "mlx.core"}:
+            raise AssertionError("machine metadata must not initialize MLX")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    metadata = machine_metadata()
+
+    assert "python_version" in metadata
+    assert "mlx" not in sys.modules
+    assert "mlx.core" not in sys.modules

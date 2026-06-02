@@ -71,9 +71,11 @@ def synchronize_mlx(target: object | None = None) -> None:
     if target is None:
         return
 
-    try:
-        import mlx.core as mx  # type: ignore[import-not-found]
-    except Exception:
+    # Synchronization must not be the operation that initializes MLX/Metal.
+    # Backend adapters are responsible for running the memory guard before
+    # importing mlx.core.
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
         return
 
     try:

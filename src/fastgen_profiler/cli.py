@@ -17,7 +17,16 @@ import click
 import typer
 
 from .backends import create_backend
-from .metrics import RunConfig, append_jsonl, make_record, machine_metadata, new_run_id, read_jsonl, utc_timestamp
+from .metrics import (
+    MeasurementRecord,
+    RunConfig,
+    append_jsonl,
+    make_record,
+    machine_metadata,
+    new_run_id,
+    read_jsonl,
+    utc_timestamp,
+)
 from .models import (
     IMPORT_SOURCES,
     ModelCandidate,
@@ -285,6 +294,7 @@ def run_command(options: RunOptions) -> int:
         return 1
 
     backend = create_backend(options.backend)
+    mlx_runtime_required = options.backend == "mlx" and not _backend_is_scaffold_only(backend)
     for preset_run in preset_runs:
         config = RunConfig(
             model=options.model,
@@ -311,7 +321,7 @@ def run_command(options: RunOptions) -> int:
             preset=preset,
             variant_label=_variant_label(preset, preset_run) if preset else "manual",
         )
-        if options.backend == "mlx":
+        if mlx_runtime_required:
             guard_error = _mlx_pre_run_guard(config.variant_label or "manual", config=config)
             if guard_error is not None:
                 records = _error_records_for_config(config, error=guard_error)
@@ -319,21 +329,55 @@ def run_command(options: RunOptions) -> int:
                 return 1
 
         memory_aborted = False
+        guard_failed = False
+        runtime_abort_error = None
+        guard_error = None
+        cleanup_status = None
         try:
             records = Profiler(backend).run(config)
+        except _memory_guard_error_type() as exc:
+            guard_failed = True
+            guard_error = f"Memory guard blocked run: {exc}"
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
+            runtime_abort_error = f"Runtime memory abort: {exc}"
+        finally:
+            if mlx_runtime_required:
+                cleanup_status = _mlx_post_run_cleanup(config.variant_label or "manual")
+        if guard_failed:
             records = _error_records_for_config(
                 config,
-                error=f"Runtime memory abort: {exc}",
+                error=guard_error or "Memory guard blocked run",
+                guard_context=cleanup_status,
             )
-        finally:
-            if options.backend == "mlx":
-                _mlx_post_run_cleanup(config.variant_label or "manual")
-        append_jsonl(options.result_jsonl, records)
         if memory_aborted:
+            records = _error_records_for_config(
+                config,
+                error=runtime_abort_error or "Runtime memory abort",
+                guard_context=cleanup_status,
+            )
+        append_jsonl(options.result_jsonl, records)
+        if options.backend == "mlx" and _records_have_errors(records):
+            return 1
+        if memory_aborted or guard_failed:
             return 1
     return 0
+
+
+def _records_have_errors(records: list[MeasurementRecord]) -> bool:
+    return any(record.error for record in records)
+
+
+def _backend_is_scaffold_only(backend: object) -> bool:
+    return bool(getattr(backend, "scaffold_only", False))
+
+
+def _memory_guard_error_type() -> type[Exception]:
+    try:
+        from fastgen_profiler.mlx_guard import MemoryGuardError
+    except ImportError:
+        return RuntimeError
+    return MemoryGuardError
 
 
 def _runtime_memory_abort_type() -> type[Exception]:
@@ -344,13 +388,21 @@ def _runtime_memory_abort_type() -> type[Exception]:
     return RuntimeMemoryAbort
 
 
-def _error_records_for_config(config: RunConfig, *, error: str) -> list:
+def _error_records_for_config(
+    config: RunConfig,
+    *,
+    error: str,
+    guard_context: dict[str, object] | None = None,
+) -> list:
+    machine = machine_metadata()
+    if guard_context is not None:
+        machine["mlx_guard_cleanup"] = guard_context.get("cleanup")
     return [
         make_record(
             config,
             run_id=new_run_id(),
             timestamp_utc=utc_timestamp(),
-            machine=machine_metadata(),
+            machine=machine,
             phase="total",
             seconds=0.0,
             error=error,
@@ -363,7 +415,8 @@ def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | 
         from fastgen_profiler.mlx_guard import (
             MAX_CONSECUTIVE_RUNS,
             check_run_allocation_budget,
-            inter_run_recovery,
+            check_text_prompt_budget,
+            inter_run_system_recovery,
             run_counter,
             should_restart_process,
         )
@@ -374,7 +427,6 @@ def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | 
                 "consecutive MLX runs to prevent Metal resource accumulation."
             )
 
-        recovery = inter_run_recovery(label=label)
         budget = None
         if config is not None:
             budget = check_run_allocation_budget(
@@ -384,36 +436,55 @@ def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | 
                 guidance=config.guidance,
                 label=label,
             )
+            check_text_prompt_budget(
+                prompt=config.prompt,
+                negative_prompt=config.negative_prompt,
+                label=label,
+            )
+        recovery = inter_run_system_recovery(label=label)
         typer.echo(
             f"[guard] pre-run '{label}': "
             f"free={recovery.get('free_gb', '?')}GB "
             f"freed={recovery.get('freed_gb', '?')}GB "
-            f"mlx_limit={recovery.get('memory_limit_gb', '?')}GB "
-            f"cache_limit={recovery.get('cache_limit_gb', '?')}GB "
             f"shape_floor={(budget or {}).get('shape_floor_gb', '?')}GB "
             f"run={recovery.get('run_number', '?')}/{MAX_CONSECUTIVE_RUNS}"
         )
-    except ImportError:
-        return None
+    except ImportError as exc:
+        return f"Memory guard blocked run: mlx_guard unavailable before MLX run: {exc}"
     except Exception as exc:
         return f"Memory guard blocked run: {exc}"
     return None
 
 
-def _mlx_post_run_cleanup(label: str) -> object | None:
+def _mlx_post_run_cleanup(label: str) -> dict[str, object] | None:
     try:
         from fastgen_profiler.mlx_guard import increment_run_counter, mlx_cleanup, system_snapshot
 
         cleanup = mlx_cleanup()
         completed_runs = increment_run_counter()
-        snap = system_snapshot()
+        try:
+            snap = system_snapshot()
+        except Exception:
+            snap = None
         typer.echo(
             f"[guard] post-run '{label}': run={completed_runs} "
-            f"{snap.summary()} freed={cleanup.get('freed_gb', '?')}GB"
+            f"{snap.summary() if snap is not None else 'free=?GB'} "
+            f"freed={cleanup.get('freed_gb', '?')}GB"
         )
-        return snap
-    except ImportError:
-        return None
+        return {"snapshot": snap, "cleanup": cleanup, "run_number": completed_runs}
+    except ImportError as exc:
+        typer.echo(
+            f"[guard] post-run '{label}': cleanup unavailable because mlx_guard could not be imported: {exc}"
+        )
+        return {
+            "snapshot": None,
+            "cleanup": {
+                "mlx_loaded": None,
+                "mlx_cache_cleared": False,
+                "mlx_cleanup_error": "mlx_guard unavailable after MLX run",
+            },
+            "run_number": None,
+        }
 
 
 def _adaptive_adjust_spec(
@@ -537,6 +608,7 @@ def profile_command(options: RunOptions) -> int:
         return 1
 
     backend = create_backend(options.backend)
+    mlx_runtime_required = options.backend == "mlx" and not _backend_is_scaffold_only(backend)
     all_records = []
 
     # Guard state: tracks memory headroom across specs.
@@ -562,7 +634,7 @@ def profile_command(options: RunOptions) -> int:
             spec=effective_spec,
         )
 
-        if options.backend == "mlx":
+        if mlx_runtime_required:
             guard_error = _mlx_pre_run_guard(spec_label, config=config)
             if guard_error is not None:
                 memory_guard_failed = True
@@ -573,34 +645,61 @@ def profile_command(options: RunOptions) -> int:
                     profile_name=profile_name,
                     spec=effective_spec,
                     error=guard_error,
+                    candidate=candidate,
                 )
                 append_jsonl(options.result_jsonl, records)
                 all_records.extend(record.to_dict() for record in records)
                 break
 
         memory_aborted = False
+        guard_failed = False
+        runtime_abort_error = None
+        guard_error = None
+        cleanup_status = None
         try:
             records = Profiler(backend).run(config)
+        except _memory_guard_error_type() as exc:
+            guard_failed = True
+            memory_guard_failed = True
+            logger.warning(f"Memory guard failure for '{spec_label}': {exc}")
+            guard_error = f"Memory guard blocked run: {exc}"
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
             memory_guard_failed = True
             logger.warning(f"Runtime memory abort for '{spec_label}': {exc}")
+            runtime_abort_error = f"Runtime memory abort: {exc}"
+        finally:
+            if mlx_runtime_required:
+                cleanup_status = _mlx_post_run_cleanup(spec_label)
+                snap = cleanup_status.get("snapshot") if cleanup_status is not None else None
+                if snap is not None:
+                    adaptive_state["last_snapshot"] = snap
+        if guard_failed:
             records = _profile_error_records(
                 options=options,
                 profile_id=profile_id,
                 profile_name=profile_name,
                 spec=effective_spec,
-                error=f"Runtime memory abort: {exc}",
+                error=guard_error or "Memory guard blocked run",
+                candidate=candidate,
+                guard_context=cleanup_status,
             )
-        finally:
-            if options.backend == "mlx":
-                snap = _mlx_post_run_cleanup(spec_label)
-                if snap is not None:
-                    adaptive_state["last_snapshot"] = snap
+        if memory_aborted:
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=runtime_abort_error or "Runtime memory abort",
+                candidate=candidate,
+                guard_context=cleanup_status,
+            )
 
         append_jsonl(options.result_jsonl, records)
         all_records.extend(record.to_dict() for record in records)
-        if memory_aborted:
+        if options.backend == "mlx" and _records_have_errors(records):
+            memory_guard_failed = True
+        if memory_aborted or guard_failed or (options.backend == "mlx" and _records_have_errors(records)):
             break
 
     for spec in skipped_specs:
@@ -1184,20 +1283,25 @@ def _profile_error_records(
     profile_name: str,
     spec: ProfileRunSpec,
     error: str,
+    candidate: ModelCandidate | None = None,
+    guard_context: dict[str, object] | None = None,
 ) -> list:
     config = _profile_run_config(
         options=options,
-        candidate=None,
+        candidate=candidate,
         profile_id=profile_id,
         profile_name=profile_name,
         spec=spec,
     )
+    machine = machine_metadata()
+    if guard_context is not None:
+        machine["mlx_guard_cleanup"] = guard_context.get("cleanup")
     return [
         make_record(
             config,
             run_id=new_run_id(),
             timestamp_utc=utc_timestamp(),
-            machine=machine_metadata(),
+            machine=machine,
             phase="total",
             seconds=0.0,
             error=error,

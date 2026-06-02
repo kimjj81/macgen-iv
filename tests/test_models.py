@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 
 from fastgen_profiler.models import (
     discover_generation_model_dirs,
@@ -10,6 +12,27 @@ from fastgen_profiler.models import (
     model_dirs_from_sources,
     replace_model_dirs_in_env,
 )
+
+
+def test_model_discovery_does_not_materialize_entire_directory_list():
+    source = Path("src/fastgen_profiler/models.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[int] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "list" or not node.args:
+            continue
+        arg = node.args[0]
+        if (
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Attribute)
+            and arg.func.attr == "iterdir"
+        ):
+            offenders.append(node.lineno)
+
+    assert offenders == []
 
 
 def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):

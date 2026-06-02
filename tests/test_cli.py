@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import builtins
 import json
 import sys
+from unittest.mock import patch
+
+import pytest
 
 import fastgen_profiler.cli as cli_module
 from fastgen_profiler.cli import main
+from fastgen_profiler.metrics import RunConfig
+
+
+@pytest.fixture(autouse=True)
+def _reset_mlx_run_counter():
+    from fastgen_profiler.mlx_guard import reset_run_counter
+
+    reset_run_counter()
+    yield
+    reset_run_counter()
 
 
 def test_cli_run_parses_required_arguments_and_stub_writes_jsonl(tmp_path):
@@ -288,14 +302,20 @@ def test_profile_command_skips_ltx23_stress(tmp_path, capsys):
     assert "skipped" in output
 
 
-def test_mlx_scaffold_writes_failed_schema_records(tmp_path):
-    jsonl_path = tmp_path / "benchmarks.jsonl"
+def test_mlx_profile_guard_error_preserves_model_candidate(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "mlx-profile.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_pre_run_guard",
+        lambda label, config=None: "Memory guard blocked run: test pressure",
+    )
 
     exit_code = main(
         [
-            "run",
+            "profile",
             "--model",
             "wan2.2",
             "--backend",
@@ -303,38 +323,83 @@ def test_mlx_scaffold_writes_failed_schema_records(tmp_path):
             "--model-path",
             str(model_path),
             "--prompt",
-            "mlx scaffold",
-            "--negative-prompt",
-            "",
+            "profile suite",
             "--seed",
-            "3",
-            "--width",
-            "256",
-            "--height",
-            "256",
-            "--frames",
-            "4",
-            "--fps",
-            "4",
-            "--steps",
-            "1",
-            "--guidance",
-            "1.0",
-            "--quant",
-            "none",
-            "--cache",
-            "none",
-            "--compile",
-            "off",
+            "12",
             "--output-dir",
             str(tmp_path / "outputs"),
             "--result-jsonl",
             str(jsonl_path),
-            "--no-save-video",
+            "--dry-run",
         ]
     )
 
-    assert exit_code == 0
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert len(records) == 1
+    assert records[0]["error"].startswith("Memory guard blocked run")
+    assert records[0]["model_path"] == str(model_path.resolve())
+
+
+def test_mlx_scaffold_writes_failed_schema_records(tmp_path):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    with (
+        patch.object(
+            cli_module,
+            "_mlx_pre_run_guard",
+            side_effect=AssertionError("scaffold must not configure MLX runtime"),
+        ),
+        patch.object(
+            cli_module,
+            "_mlx_post_run_cleanup",
+            side_effect=AssertionError("scaffold must not run MLX cleanup"),
+        ),
+    ):
+        exit_code = main(
+            [
+                "run",
+                "--model",
+                "wan2.2",
+                "--backend",
+                "mlx",
+                "--model-path",
+                str(model_path),
+                "--prompt",
+                "mlx scaffold",
+                "--negative-prompt",
+                "",
+                "--seed",
+                "3",
+                "--width",
+                "256",
+                "--height",
+                "256",
+                "--frames",
+                "4",
+                "--fps",
+                "4",
+                "--steps",
+                "1",
+                "--guidance",
+                "1.0",
+                "--quant",
+                "none",
+                "--cache",
+                "none",
+                "--compile",
+                "off",
+                "--output-dir",
+                str(tmp_path / "outputs"),
+                "--result-jsonl",
+                str(jsonl_path),
+                "--no-save-video",
+            ]
+        )
+
+
+    assert exit_code == 1
     records = _read_jsonl(jsonl_path)
     assert records
     assert any(record["error"] for record in records)
@@ -346,6 +411,7 @@ def test_mlx_run_applies_pre_run_memory_guard(tmp_path, monkeypatch):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
     monkeypatch.setattr(
         cli_module,
         "_mlx_pre_run_guard",
@@ -398,6 +464,368 @@ def test_mlx_run_applies_pre_run_memory_guard(tmp_path, monkeypatch):
     assert len(records) == 1
     assert records[0]["phase"] == "total"
     assert "Memory guard blocked run" in records[0]["error"]
+
+
+def test_mlx_runtime_abort_records_cleanup_status(tmp_path, monkeypatch):
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: {"cleanup": {"mlx_cache_cleared": True, "mlx_cleanup_error": None}},
+    )
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(RuntimeMemoryAbort("runtime stop")),
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx abort",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["error"] == "Runtime memory abort: runtime stop"
+    assert records[0]["machine"]["mlx_guard_cleanup"] == {
+        "mlx_cache_cleared": True,
+        "mlx_cleanup_error": None,
+    }
+
+
+def test_mlx_inner_memory_guard_error_records_cleanup_status(tmp_path, monkeypatch):
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: {"cleanup": {"mlx_cache_cleared": False, "mlx_cleanup_error": None}},
+    )
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(MemoryGuardError("file preflight blocked")),
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx guard",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["error"] == "Memory guard blocked run: file preflight blocked"
+    assert records[0]["machine"]["mlx_guard_cleanup"] == {
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": None,
+    }
+
+
+def test_mlx_profile_inner_memory_guard_error_preserves_model_candidate(tmp_path, monkeypatch):
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    jsonl_path = tmp_path / "mlx-profile.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: {"cleanup": {"mlx_cache_cleared": False, "mlx_cleanup_error": "failed"}},
+    )
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(MemoryGuardError("adapter guard blocked")),
+    )
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "profile guard",
+            "--seed",
+            "12",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert records[0]["error"] == "Memory guard blocked run: adapter guard blocked"
+    assert records[0]["model_path"] == str(model_path.resolve())
+    assert records[0]["machine"]["mlx_guard_cleanup"] == {
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": "failed",
+    }
+
+
+def test_mlx_pre_run_guard_checks_shape_budget_before_system_recovery(tmp_path, monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    calls: list[str] = []
+    monkeypatch.setattr(mlx_guard, "should_restart_process", lambda: False)
+    monkeypatch.setattr(mlx_guard, "run_counter", lambda: 0)
+    monkeypatch.setattr(
+        mlx_guard,
+        "check_run_allocation_budget",
+        lambda **kwargs: calls.append("budget") or {"shape_floor_gb": 1},
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "check_text_prompt_budget",
+        lambda **kwargs: calls.append("prompt") or {"prompt_chars": 6},
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "inter_run_system_recovery",
+        lambda label: calls.append("recovery") or {
+            "free_gb": 100,
+            "freed_gb": 0,
+            "run_number": 1,
+        },
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "configure_mlx_resource_limits",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("CLI pre-run must not import/configure MLX")),
+    )
+
+    config = RunConfig(
+        model="ltx2.3",
+        backend="mlx",
+        model_path=str(tmp_path),
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=512,
+        height=512,
+        frames=9,
+        fps=24,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path / "outputs",
+        result_jsonl=tmp_path / "results.jsonl",
+        save_video=False,
+        dry_run=False,
+    )
+
+    assert cli_module._mlx_pre_run_guard("order", config=config) is None
+    assert calls == ["budget", "prompt", "recovery"]
+
+
+def test_mlx_pre_run_guard_blocks_oversized_prompt_before_recovery(tmp_path, monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    calls: list[str] = []
+    monkeypatch.setattr(mlx_guard, "should_restart_process", lambda: False)
+    monkeypatch.setattr(mlx_guard, "run_counter", lambda: 0)
+    monkeypatch.setattr(
+        mlx_guard,
+        "check_run_allocation_budget",
+        lambda **kwargs: calls.append("budget") or {"shape_floor_gb": 1},
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "check_text_prompt_budget",
+        lambda **kwargs: calls.append("prompt") or (_ for _ in ()).throw(MemoryGuardError("prompt too large")),
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "inter_run_system_recovery",
+        lambda label: calls.append("recovery") or {"free_gb": 100},
+    )
+
+    config = RunConfig(
+        model="ltx2.3",
+        backend="mlx",
+        model_path=str(tmp_path),
+        model_id=None,
+        model_source_root=None,
+        prompt="x" * 9000,
+        negative_prompt="",
+        seed=1,
+        width=512,
+        height=512,
+        frames=9,
+        fps=24,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path / "outputs",
+        result_jsonl=tmp_path / "results.jsonl",
+        save_video=False,
+        dry_run=False,
+    )
+
+    error = cli_module._mlx_pre_run_guard("prompt", config=config)
+
+    assert error == "Memory guard blocked run: prompt too large"
+    assert calls == ["budget", "prompt"]
+
+
+def test_mlx_pre_run_guard_blocks_after_one_completed_run(monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    monkeypatch.setattr(mlx_guard, "run_counter", lambda: 1)
+    monkeypatch.setattr(mlx_guard, "should_restart_process", lambda: True)
+
+    error = cli_module._mlx_pre_run_guard("second")
+
+    assert error is not None
+    assert "process restart required after 1 consecutive MLX runs" in error
+
+
+def test_mlx_pre_run_guard_fails_closed_when_guard_unavailable(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "fastgen_profiler.mlx_guard":
+            raise ImportError("missing guard")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    error = cli_module._mlx_pre_run_guard("missing-guard")
+
+    assert error is not None
+    assert "mlx_guard unavailable before MLX run" in error
+
+
+def test_mlx_post_run_cleanup_reports_guard_import_failure(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "fastgen_profiler.mlx_guard":
+            raise ImportError("missing guard")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    status = cli_module._mlx_post_run_cleanup("missing-guard")
+
+    assert status is not None
+    assert status["cleanup"] == {
+        "mlx_loaded": None,
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": "mlx_guard unavailable after MLX run",
+    }
+
+
+def test_mlx_post_run_cleanup_keeps_cleanup_when_snapshot_fails(monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    monkeypatch.setattr(mlx_guard, "mlx_cleanup", lambda: {"freed_gb": 0.5})
+    monkeypatch.setattr(mlx_guard, "increment_run_counter", lambda: 1)
+    monkeypatch.setattr(mlx_guard, "system_snapshot", lambda: (_ for _ in ()).throw(RuntimeError("snapshot failed")))
+
+    status = cli_module._mlx_post_run_cleanup("snapshot-failed")
+
+    assert status == {
+        "snapshot": None,
+        "cleanup": {"freed_gb": 0.5},
+        "run_number": 1,
+    }
 
 
 def test_smoke_preset_applies_requested_shape_and_defaults(tmp_path):
@@ -732,7 +1160,7 @@ def test_interactive_mlx_model_selection(tmp_path, monkeypatch):
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 1
     records = _read_jsonl(jsonl_path)
     assert all(record["model_id"] == "wan-second" for record in records)
     assert any("wan-second" in record["error"] for record in records if record["error"])

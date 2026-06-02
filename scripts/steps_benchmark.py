@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""Steps benchmark: measure denoise + VAE decode time across step counts for LTX2.3.
+
+Includes MLX memory guard to prevent kernel panic from repeated GPU-heavy runs.
+Defaults to a single minimal step; set FASTGEN_STEPS_VALUES=24,32,36,40,44
+explicitly for the full historical sweep.
+Real model execution requires FASTGEN_STEPS_ALLOW_HEAVY=1.
+Multiple heavy child runs also require FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY=1.
+"""
+
+import sys
+import time
+import json
+import os
+import subprocess
+import importlib.util
+from pathlib import Path
+
+# Force unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from fastgen_profiler.mlx_guard import (
+    MemoryGuardError,
+    RuntimeMemoryAbort,
+    check_memory_guard,
+    check_host_allocation_headroom,
+    check_run_allocation_budget,
+    check_runtime_memory,
+    check_text_prompt_budget,
+    increment_run_counter,
+    mlx_cleanup,
+    run_counter,
+    should_restart_process,
+    MAX_CONSECUTIVE_RUNS,
+    COOLDOWN_SECONDS,
+)
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return _positive_int_value(name, raw)
+
+
+def _positive_int_value(name: str, raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise MemoryGuardError(f"{name} must be a positive integer, got {raw!r}") from exc
+    if value <= 0:
+        raise MemoryGuardError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+MODEL_PATH = Path(os.environ.get(
+    "FASTGEN_STEPS_MODEL_PATH",
+    str(REPO_ROOT / "artifacts" / "models" / "LTX-2.3-distilled-mlx"),
+))
+OUTPUT_BASE = Path(os.environ.get(
+    "FASTGEN_STEPS_OUTPUT_BASE",
+    str(REPO_ROOT / "artifacts" / "steps_benchmark"),
+))
+PROMPT = os.environ.get(
+    "FASTGEN_STEPS_PROMPT",
+    "A golden retriever running through a sunlit meadow, cinematic, slow motion",
+)
+NEGATIVE_PROMPT = os.environ.get("FASTGEN_STEPS_NEGATIVE_PROMPT", "")
+WIDTH = _env_positive_int("FASTGEN_STEPS_WIDTH", 512)
+HEIGHT = _env_positive_int("FASTGEN_STEPS_HEIGHT", 512)
+FRAMES = _env_positive_int("FASTGEN_STEPS_FRAMES", 9)
+FPS = _env_positive_int("FASTGEN_STEPS_FPS", 24)
+SEED = int(os.environ.get("FASTGEN_STEPS_SEED", "42"))
+STEP_VALUES = [
+    _positive_int_value("FASTGEN_STEPS_VALUES", value.strip())
+    for value in os.environ.get("FASTGEN_STEPS_VALUES", "1").split(",")
+    if value.strip()
+]
+ALLOW_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_HEAVY") == "1"
+ALLOW_MULTIPLE_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY") == "1"
+RESULTS_JSONL = OUTPUT_BASE / "results.jsonl"
+CHILD_MODE_ENV = "FASTGEN_STEPS_CHILD"
+CHILD_STEP_ENV = "FASTGEN_STEPS_CHILD_STEP"
+CHILD_RESULT_ENV = "FASTGEN_STEPS_CHILD_RESULT"
+CHILD_TIMEOUT_SECONDS = _env_positive_int("FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS", 60 * 60)
+CHILD_LOG_TAIL_BYTES = _env_positive_int("FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES", 64 * 1024)
+CHILD_RESULT_MAX_BYTES = _env_positive_int("FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES", 1024 * 1024)
+
+# Exit code to signal orchestrator that the process should be restarted.
+EXIT_RESTART = 10
+
+
+def run_single(steps: int):
+    import gc
+
+    label = f"steps_{steps}"
+    if not ALLOW_HEAVY:
+        return {
+            "steps": steps,
+            "skipped": True,
+            "error": (
+                "skipped: real MLX benchmark requires FASTGEN_STEPS_ALLOW_HEAVY=1 "
+                "after reviewing memory limits and model paths"
+            ),
+        }
+
+    # Pre-run memory guard
+    guard = check_memory_guard(label=label)
+    budget = check_run_allocation_budget(
+        width=WIDTH,
+        height=HEIGHT,
+        frames=FRAMES,
+        guidance=1.0,
+        label=label,
+    )
+    check_text_prompt_budget(
+        prompt=PROMPT,
+        negative_prompt=NEGATIVE_PROMPT,
+        label=label,
+    )
+    if importlib.util.find_spec("mlx_video") is None:
+        raise MemoryGuardError(
+            "dependency unavailable before MLX import: mlx_video is required "
+            "for the LTX2.3 steps benchmark"
+        )
+    run_num = run_counter() + 1
+    print(f"  [guard] run #{run_num} free={guard.get('free_gb', '?')}GB "
+          f"pressure={guard.get('pressure', '?')} "
+          f"shape_floor={budget.get('shape_floor_gb', '?')}GB")
+
+    from fastgen_profiler.backends.ltx23_mlx_adapter import create_ltx23_pipeline
+
+    step_dir = OUTPUT_BASE / f"steps_{steps}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {"steps": steps, "width": WIDTH, "height": HEIGHT, "frames": FRAMES}
+
+    pipe = create_ltx23_pipeline(
+        model_path=MODEL_PATH,
+        seed=SEED,
+        width=WIDTH,
+        height=HEIGHT,
+        frames=FRAMES,
+        steps=steps,
+        fps=FPS,
+        guidance=1.0,
+        save_video=False,
+    )
+
+    # Load model
+    t0 = time.perf_counter()
+    pipe.load_model()
+    t1 = time.perf_counter()
+    result["load_model_s"] = round(t1 - t0, 2)
+    print(f"  load_model: {result['load_model_s']}s")
+
+    import mlx.core as mx
+
+    # Text encode
+    t0 = time.perf_counter()
+    prepared = pipe.prepare_prompt(prompt=PROMPT, negative_prompt=NEGATIVE_PROMPT)
+    context = pipe.encode_text(prepared)
+    mx.eval(context)
+    t1 = time.perf_counter()
+    result["text_encode_s"] = round(t1 - t0, 2)
+    print(f"  text_encode: {result['text_encode_s']}s")
+
+    # Init latents
+    latents = pipe.init_latents(seed=SEED, width=WIDTH, height=HEIGHT, frames=FRAMES)
+    mx.eval(latents)
+
+    # Denoise
+    denoise_times = []
+    for i in range(steps):
+        check_runtime_memory(label=f"{label} denoise {i+1}/{steps} before")
+        mx.eval(latents)
+        t0 = time.perf_counter()
+        latents = pipe.denoise_step(
+            latents, step_index=i, steps=steps, guidance=1.0, cache="none"
+        )
+        mx.eval(latents)
+        check_runtime_memory(label=f"{label} denoise {i+1}/{steps} after")
+        t1 = time.perf_counter()
+        step_s = t1 - t0
+        denoise_times.append(step_s)
+        if (i + 1) % 8 == 0 or i == 0:
+            print(f"  denoise {i+1}/{steps} ({step_s:.2f}s)")
+
+    result["denoise_total_s"] = round(sum(denoise_times), 2)
+    result["denoise_avg_s"] = round(sum(denoise_times) / len(denoise_times), 2)
+    result["denoise_min_s"] = round(min(denoise_times), 2)
+    result["denoise_max_s"] = round(max(denoise_times), 2)
+
+    # VAE decode
+    mx.eval(latents)
+    check_runtime_memory(label=f"{label} vae_decode before")
+    t0 = time.perf_counter()
+    video = pipe.decode(latents)
+    _check_decoded_video_shape(video, label=label)
+    check_runtime_memory(label=f"{label} vae_decode after")
+    t1 = time.perf_counter()
+    result["vae_decode_s"] = round(t1 - t0, 2)
+
+    # Quality metrics
+    result["video_shape"] = list(video.shape)
+    result["pixel_min"] = int(video.min())
+    result["pixel_max"] = int(video.max())
+    result["pixel_mean"] = round(float(video.mean()), 2)
+    result["pixel_std"] = round(float(video.std()), 2)
+
+    # Save frames as PNG
+    check_host_allocation_headroom(video.nbytes * 2, label=f"{label} png frames")
+    from PIL import Image
+    img = None
+    for idx in range(video.shape[0]):
+        img = Image.fromarray(video[idx])
+        img.save(str(step_dir / f"frame_{idx:03d}.png"))
+
+    total = result["denoise_total_s"] + result["vae_decode_s"]
+    print(f"  DONE: denoise={result['denoise_total_s']}s  vae={result['vae_decode_s']}s  "
+          f"total={round(total,1)}s  pixels=[{result['pixel_min']},{result['pixel_max']}] "
+          f"mean={result['pixel_mean']}")
+
+    # Aggressive cleanup to prevent resource accumulation
+    del pipe, latents, video, context, prepared
+    if img is not None:
+        del img
+    gc.collect()
+    cleanup = mlx_cleanup()
+    print(f"  [guard] cleanup: freed={cleanup.get('freed_gb', '?')}GB "
+          f"now_free={cleanup.get('free_after_gb', '?')}GB")
+    increment_run_counter()
+
+    return result
+
+
+def _check_decoded_video_shape(video, *, label: str) -> None:
+    actual = tuple(getattr(video, "shape", ()))
+    expected = (FRAMES, HEIGHT, WIDTH, 3)
+    if actual != expected:
+        raise RuntimeMemoryAbort(
+            f"decoded benchmark video must have shape {expected}, got {actual} for {label}"
+        )
+
+
+def run_child() -> int:
+    OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+    try:
+        result_path = _child_result_path_from_env()
+        steps = _positive_int_value(CHILD_STEP_ENV, os.environ[CHILD_STEP_ENV])
+    except (KeyError, MemoryGuardError) as exc:
+        print(f"  [guard] child BLOCKED: invalid child environment: {exc}")
+        return 1
+    try:
+        result = run_single(steps)
+    except MemoryGuardError as e:
+        print(f"  [guard] steps={steps} BLOCKED: {e}")
+        result = {"steps": steps, "error": str(e), "skipped": True, "guard_blocked": True}
+    except RuntimeMemoryAbort as e:
+        print(f"  [guard] steps={steps} ABORTED: {e}")
+        result = {"steps": steps, "error": str(e), "aborted": True}
+        result["cleanup"] = mlx_cleanup()
+    except Exception as e:
+        print(f"  steps={steps} FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        result = {"steps": steps, "error": str(e)}
+        result["cleanup"] = mlx_cleanup()
+
+    temp_result_path = result_path.with_suffix(result_path.suffix + ".tmp")
+    temp_result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+    temp_result_path.replace(result_path)
+    return 0
+
+
+def _child_result_path_from_env() -> Path:
+    try:
+        raw = os.environ[CHILD_RESULT_ENV]
+    except KeyError as exc:
+        raise MemoryGuardError(f"{CHILD_RESULT_ENV} is required in child mode") from exc
+    result_path = Path(raw)
+    output_base = OUTPUT_BASE.resolve()
+    resolved = result_path.resolve()
+    if resolved.parent != output_base:
+        raise MemoryGuardError(
+            f"{CHILD_RESULT_ENV} must point inside {output_base}, got {resolved}"
+        )
+    return resolved
+
+
+def run_step_in_child(steps: int) -> dict:
+    child_result = OUTPUT_BASE / f"steps_{steps}.child.json"
+    child_log = OUTPUT_BASE / f"steps_{steps}.child.log"
+    child_result.unlink(missing_ok=True)
+    child_log.unlink(missing_ok=True)
+    env = dict(os.environ)
+    env[CHILD_MODE_ENV] = "1"
+    env[CHILD_STEP_ENV] = str(steps)
+    env[CHILD_RESULT_ENV] = str(child_result)
+    try:
+        with child_log.open("w", encoding="utf-8") as log:
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve())],
+                cwd=str(REPO_ROOT),
+                env=env,
+                text=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                timeout=CHILD_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired:
+        _print_child_log_tail(child_log)
+        return {
+            "steps": steps,
+            "error": f"child process timed out after {CHILD_TIMEOUT_SECONDS}s",
+            "aborted": True,
+            "log_path": str(child_log),
+        }
+    _print_child_log_tail(child_log)
+    if child_result.exists():
+        result_size = child_result.stat().st_size
+        if result_size > CHILD_RESULT_MAX_BYTES:
+            return {
+                "steps": steps,
+                "error": (
+                    f"child result file is {result_size} bytes, "
+                    f"exceeds limit {CHILD_RESULT_MAX_BYTES} bytes"
+                ),
+                "aborted": True,
+                "log_path": str(child_log),
+            }
+        try:
+            records = [
+                json.loads(line)
+                for line in child_result.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except json.JSONDecodeError as exc:
+            return {
+                "steps": steps,
+                "error": f"child result file is not valid JSONL: {exc}",
+                "aborted": True,
+                "log_path": str(child_log),
+            }
+        if not records:
+            return {
+                "steps": steps,
+                "error": "child result file did not contain a result record",
+                "aborted": True,
+                "log_path": str(child_log),
+            }
+        record = records[-1]
+        record.setdefault("log_path", str(child_log))
+        return record
+    return {
+        "steps": steps,
+        "error": f"child process exited {result.returncode} without a result record",
+        "aborted": True,
+        "log_path": str(child_log),
+    }
+
+
+def _print_child_log_tail(path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= 0:
+        return
+    with path.open("rb") as handle:
+        if size > CHILD_LOG_TAIL_BYTES:
+            handle.seek(-CHILD_LOG_TAIL_BYTES, os.SEEK_END)
+            print(f"\n[guard] child log tail from {path} ({CHILD_LOG_TAIL_BYTES} bytes):")
+        data = handle.read()
+    print(data.decode("utf-8", errors="replace"), end="")
+
+
+def parent_inter_child_recovery(label: str) -> dict[str, object]:
+    """System-only recovery between child MLX processes.
+
+    The parent process must not import MLX here; each child owns MLX runtime
+    setup and teardown.
+    """
+    status = check_memory_guard(label=label)
+    time.sleep(COOLDOWN_SECONDS)
+    return status
+
+
+def main():
+    OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+    if os.environ.get(CHILD_MODE_ENV) == "1":
+        return run_child()
+
+    if ALLOW_HEAVY and len(STEP_VALUES) > 1 and not ALLOW_MULTIPLE_HEAVY:
+        error = (
+            "skipped: multiple heavy MLX child runs require "
+            "FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY=1 after reviewing cooldown, "
+            "memory reserve, and model paths"
+        )
+        with open(RESULTS_JSONL, "w") as f:
+            for steps in STEP_VALUES:
+                f.write(json.dumps({"steps": steps, "error": error, "skipped": True}) + "\n")
+        print(f"  [guard] {error}")
+        print(f"Results: {RESULTS_JSONL}")
+        return 1
+
+    # Clean previous partial results
+    for steps in STEP_VALUES:
+        d = OUTPUT_BASE / f"steps_{steps}"
+        if d.exists():
+            import shutil
+            shutil.rmtree(d)
+
+    if RESULTS_JSONL.exists():
+        RESULTS_JSONL.unlink()
+
+    all_results = []
+    completed_child_runs = 0
+    for steps in STEP_VALUES:
+        print(f"\n{'='*60}")
+        process_run = completed_child_runs + 1 if ALLOW_HEAVY else run_counter() + 1
+        print(f"Running steps={steps}  (process run #{process_run}/{MAX_CONSECUTIVE_RUNS} max)")
+        print(f"{'='*60}")
+
+        # Inter-run recovery: cleanup + cooldown + memory check.
+        # Heavy mode runs MLX in child processes, so the parent uses a
+        # system-only check/cooldown and avoids importing MLX itself.
+        if ALLOW_HEAVY and completed_child_runs > 0:
+            try:
+                recovery = parent_inter_child_recovery(label=f"pre-steps_{steps}")
+                print(f"  [guard] parent recovery: free={recovery.get('free_gb', '?')}GB")
+            except MemoryGuardError as e:
+                print(f"  [guard] SKIPPING steps={steps}: {e}")
+                all_results.append({"steps": steps, "error": str(e), "skipped": True})
+                continue
+        elif run_counter() > 0:
+            try:
+                recovery = parent_inter_child_recovery(label=f"pre-steps_{steps}")
+                print(f"  [guard] recovery: free={recovery.get('free_gb', '?')}GB")
+            except MemoryGuardError as e:
+                print(f"  [guard] SKIPPING steps={steps}: {e}")
+                all_results.append({"steps": steps, "error": str(e), "skipped": True})
+                continue
+
+        # Check if process should restart to avoid Metal leak accumulation
+        if not ALLOW_HEAVY and should_restart_process():
+            print(f"  [guard] Process has run {run_counter()} times. "
+                  f"Recommending restart to prevent Metal resource leak.")
+            # Save what we have so far
+            with open(RESULTS_JSONL, "w") as f:
+                for r in all_results:
+                    f.write(json.dumps(r) + "\n")
+            print(f"  [guard] Partial results saved to {RESULTS_JSONL}")
+            print(f"  [guard] Remaining steps: {[s for s in STEP_VALUES if not any(r.get('steps') == s and 'error' not in r for r in all_results)]}")
+            sys.exit(EXIT_RESTART)
+
+        try:
+            r = run_step_in_child(steps) if ALLOW_HEAVY else run_single(steps)
+            all_results.append(r)
+            if ALLOW_HEAVY and not r.get("skipped") and not r.get("aborted") and "error" not in r:
+                completed_child_runs += 1
+            if r.get("skipped"):
+                print(f"  [guard] steps={steps} SKIPPED: {r['error']}")
+            if ALLOW_HEAVY and (
+                r.get("aborted")
+                or r.get("guard_blocked")
+                or ("error" in r and not r.get("skipped"))
+            ):
+                print(
+                    "  [guard] stopping remaining heavy steps after child "
+                    "abort/error to avoid repeated MLX/Metal initialization."
+                )
+                break
+        except MemoryGuardError as e:
+            print(f"  [guard] steps={steps} BLOCKED: {e}")
+            all_results.append({"steps": steps, "error": str(e), "skipped": True})
+        except RuntimeMemoryAbort as e:
+            print(f"  [guard] steps={steps} ABORTED: {e}")
+            all_results.append({"steps": steps, "error": str(e), "aborted": True})
+            increment_run_counter()
+            mlx_cleanup()
+        except Exception as e:
+            print(f"  steps={steps} FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            all_results.append({"steps": steps, "error": str(e)})
+            # Still cleanup after failure to prevent cascading issues
+            mlx_cleanup()
+
+    # Write JSONL
+    with open(RESULTS_JSONL, "w") as f:
+        for r in all_results:
+            f.write(json.dumps(r) + "\n")
+
+    print(f"\n\n{'='*60}")
+    print("BENCHMARK COMPLETE")
+    print(f"{'='*60}")
+    print(f"Results: {RESULTS_JSONL}")
+    exit_code = 0
+    for r in all_results:
+        if "error" in r:
+            if r.get("skipped"):
+                status = "SKIPPED"
+            elif r.get("aborted"):
+                status = "ABORTED"
+            else:
+                status = "ERROR"
+            if ALLOW_HEAVY or r.get("aborted") or not r.get("skipped"):
+                exit_code = 1
+            print(f"  steps={r['steps']}: {status} - {r['error']}")
+        else:
+            total = round(r['denoise_total_s'] + r['vae_decode_s'], 1)
+            print(f"  steps={r['steps']}: denoise={r['denoise_total_s']}s  vae={r['vae_decode_s']}s  "
+                  f"total={total}s  pixels=[{r['pixel_min']},{r['pixel_max']}] mean={r['pixel_mean']}")
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

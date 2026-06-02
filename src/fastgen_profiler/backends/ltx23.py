@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from .mlx import MLXBackend
+from typing import Any
 
 
-class LTX23Backend(MLXBackend):
-    name = "ltx2.3"
+def __getattr__(name: str) -> Any:
+    if name != "LTX23Backend":
+        raise AttributeError(name)
+    from .mlx import MLXBackend
+
+    class LTX23Backend(MLXBackend):
+        name = "ltx2.3"
+
+    return LTX23Backend
+
+
+__all__ = ["LTX23Backend"]
