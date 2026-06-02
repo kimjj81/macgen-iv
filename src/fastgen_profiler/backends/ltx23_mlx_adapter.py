@@ -360,8 +360,14 @@ class LTX23MLXPipeline:
             return
         try:
             mx.eval(target)
-        except Exception:
-            return
+        except Exception as exc:
+            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
+
+            mlx_cleanup()
+            raise RuntimeMemoryAbort(
+                "Runtime memory abort [ltx2.3 synchronize]: MLX synchronization failed; "
+                "aborting because Metal runtime state may be unsafe."
+            ) from exc
 
     def load_model(self) -> dict[str, object]:
         if self.model is not None:

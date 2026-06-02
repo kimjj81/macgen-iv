@@ -38,6 +38,9 @@ abort path must not be converted into an unhandled cleanup exception.
 Synchronization helpers must follow the same rule: calling `synchronize()` or
 `synchronize_mlx()` must not import `mlx.core` or configure MLX limits in a
 process that has not already loaded MLX for real model work.
+If a synchronization `mx.eval(...)` fails after MLX is loaded, the helper must
+clean up and abort instead of swallowing the exception, because asynchronous
+Metal runtime state may already be unsafe.
 
 Allocator limits must preserve the configured system reserve. If total-memory
 telemetry is unavailable on macOS, or if the derived safe MLX cap is below the

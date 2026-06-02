@@ -1769,6 +1769,53 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert calls == [ltx_target, wan_target]
         limits.assert_not_called()
 
+    def test_base_synchronize_aborts_and_cleans_up_when_loaded_mlx_eval_fails(self, monkeypatch):
+        from fastgen_profiler.backends.base import synchronize_mlx
+
+        cleanup_calls: list[str] = []
+        fake_mx = types.SimpleNamespace(
+            eval=lambda target: (_ for _ in ()).throw(RuntimeError("metal sync failed")),
+            clear_cache=lambda: cleanup_calls.append("clear"),
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX synchronization failed"):
+            synchronize_mlx(object())
+
+        assert cleanup_calls == ["clear"]
+
+    def test_adapter_synchronize_aborts_and_cleans_up_when_loaded_mlx_eval_fails(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        cleanup_calls: list[str] = []
+        fake_mx = types.SimpleNamespace(
+            eval=lambda target: (_ for _ in ()).throw(RuntimeError("metal sync failed")),
+            clear_cache=lambda: cleanup_calls.append("clear"),
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        with pytest.raises(RuntimeMemoryAbort, match="ltx2.3 synchronize"):
+            LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            ).synchronize(object())
+        with pytest.raises(RuntimeMemoryAbort, match="wan2.2 synchronize"):
+            Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            ).synchronize(object())
+
+        assert cleanup_calls == ["clear", "clear"]
+
     def test_mlx_backend_watchdog_fails_closed_when_guard_unavailable(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.mlx import MLXBackend
         from fastgen_profiler.metrics import RunConfig
