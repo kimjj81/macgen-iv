@@ -340,8 +340,8 @@ def run_single(steps: int):
         print(f"  [guard] cleanup: freed={cleanup.get('freed_gb', '?')}GB "
               f"now_free={cleanup.get('free_after_gb', '?')}GB")
         increment_run_counter()
-    except Exception:
-        _clear_exception_traceback_frames(sys.exc_info()[1])
+    except Exception as exc:
+        _clear_exception_traceback_frames(exc)
         pipe = latents = video = context = prepared = img = None
         gc.collect()
         raise
