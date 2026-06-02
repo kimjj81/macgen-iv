@@ -1612,6 +1612,26 @@ class TestAdaptiveBatchManager:
         assert decision.frames == 10
         assert decision.steps == 8
 
+    def test_history_is_bounded_for_repeated_direct_calls(self, monkeypatch):
+        import fastgen_profiler.mlx_guard as guard
+
+        monkeypatch.setattr(guard, "MAX_ADAPTIVE_BATCH_HISTORY", 2)
+        mgr = AdaptiveBatchManager(self._make_config(target_frames=10, target_steps=8))
+        snap = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.2,
+            swap_files=0,
+            free_fraction=0.625,
+        )
+
+        mgr.next_batch(snapshot=None)
+        mgr.next_batch(snapshot=snap)
+        mgr.next_batch(snapshot=snap)
+
+        assert len(mgr.history) == 2
+        assert [decision.phase for decision in mgr.history] == ["final", "steady"]
+
     @pytest.mark.parametrize(
         ("kwargs", "message"),
         [

@@ -69,6 +69,7 @@ ADAPTIVE_INITIAL_STEPS = 4
 ADAPTIVE_MAX_GROWTH_FACTOR = 2.0
 ADAPTIVE_HEADROOM_THRESHOLD = 0.3  # grow if >30% memory free after probe
 ADAPTIVE_SHRINK_THRESHOLD = 0.15   # shrink if <15% memory free after probe
+MAX_ADAPTIVE_BATCH_HISTORY = 256
 
 logger = logging.getLogger("fastgen_profiler.mlx_guard")
 _MLX_IMPORT_PROBE_ENV = "FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE"
@@ -1108,7 +1109,7 @@ class AdaptiveBatchManager:
                 reason=f"Initial probe: {self.config.initial_frames} frames, {self.config.initial_steps} steps",
                 snapshot=snapshot,
             )
-            self._history.append(decision)
+            self._append_history(decision)
             self._current_frames = decision.frames
             self._current_steps = decision.steps
             return decision
@@ -1122,7 +1123,7 @@ class AdaptiveBatchManager:
                 reason="Running at target size",
                 snapshot=snapshot,
             )
-            self._history.append(decision)
+            self._append_history(decision)
             return decision
 
         # Determine headroom from snapshot
@@ -1214,10 +1215,16 @@ class AdaptiveBatchManager:
                     snapshot=snapshot,
                 )
 
-        self._history.append(decision)
+        self._append_history(decision)
         self._current_frames = decision.frames
         self._current_steps = decision.steps
         return decision
+
+    def _append_history(self, decision: BatchDecision) -> None:
+        self._history.append(decision)
+        overflow = len(self._history) - MAX_ADAPTIVE_BATCH_HISTORY
+        if overflow > 0:
+            del self._history[:overflow]
 
     def _compute_headroom(self, snapshot: SystemSnapshot | None) -> float | None:
         """Compute memory headroom fraction (0.0 = full, 1.0 = empty)."""
