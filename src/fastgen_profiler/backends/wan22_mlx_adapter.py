@@ -23,6 +23,8 @@ from typing import Any
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 _MAX_PRELOAD_SCAN_FILES = 10_000
+_MAX_CONFIG_DIMENSION = 65_536
+_MAX_CONFIG_AREA = 4096 * 4096
 
 
 def _require_non_empty_parameters(component: Any, label: str) -> Any:
@@ -244,12 +246,12 @@ class Wan22MLXPipeline:
                     f"Wan2.2 config field {key}={value} must be a positive structural dimension; "
                     "refusing to construct MLX model"
                 )
-            if value > 65_536:
+            if value > _MAX_CONFIG_DIMENSION:
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
                 raise RuntimeMemoryAbort(
                     f"Wan2.2 config field {key}={value} exceeds safe structural dimension "
-                    "65536; refusing to construct MLX model"
+                    f"{_MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
                 )
         attention_floor = layers * hidden_size * hidden_size * 4
         mlp_floor = layers * hidden_size * ffn_size * 3
@@ -750,10 +752,28 @@ def _load_config(model_path: Path) -> tuple[Any, dict[str, Any] | None]:
 def _load_raw_config_for_preflight(config_path: Path) -> Any:
     config_dict = _read_bounded_json_config(config_path, "preflight config")
     config = SimpleNamespace(
-        patch_size=_positive_int_tuple(config_dict.get("patch_size", (1, 2, 2)), "patch_size", length=3),
-        vae_stride=_positive_int_tuple(config_dict.get("vae_stride", (4, 16, 16)), "vae_stride", length=3),
-        max_area=_non_negative_int(config_dict.get("max_area", 0), "max_area"),
-        vae_z_dim=_positive_int(config_dict.get("vae_z_dim", config_dict.get("in_dim", 48)), "vae_z_dim"),
+        patch_size=_positive_int_tuple(
+            config_dict.get("patch_size", (1, 2, 2)),
+            "patch_size",
+            length=3,
+            max_value=_MAX_CONFIG_DIMENSION,
+        ),
+        vae_stride=_positive_int_tuple(
+            config_dict.get("vae_stride", (4, 16, 16)),
+            "vae_stride",
+            length=3,
+            max_value=_MAX_CONFIG_DIMENSION,
+        ),
+        max_area=_non_negative_int(
+            config_dict.get("max_area", 0),
+            "max_area",
+            max_value=_MAX_CONFIG_AREA,
+        ),
+        vae_z_dim=_positive_int(
+            config_dict.get("vae_z_dim", config_dict.get("in_dim", 48)),
+            "vae_z_dim",
+            max_value=_MAX_CONFIG_DIMENSION,
+        ),
         dim=_positive_int(config_dict.get("dim", config_dict.get("hidden_size", 4096)), "dim"),
         ffn_dim=_positive_int(config_dict.get("ffn_dim", 16_384), "ffn_dim"),
         num_layers=_positive_int(config_dict.get("num_layers", config_dict.get("num_hidden_layers", 1)), "num_layers"),
@@ -791,7 +811,7 @@ def _latent_shape_and_seq_len(width: int, height: int, frames: int, config: Any)
     return target_shape, seq_len
 
 
-def _positive_int(value: Any, key: str) -> int:
+def _positive_int(value: Any, key: str, *, max_value: int | None = None) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -806,6 +826,13 @@ def _positive_int(value: Any, key: str) -> int:
         raise RuntimeMemoryAbort(
             f"Wan2.2 config field {key}={result} must be a positive integer; "
             "refusing to construct MLX model"
+        )
+    if max_value is not None and result > max_value:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"Wan2.2 config field {key}={result} exceeds safe structural dimension "
+            f"{max_value}; refusing to construct MLX model"
         )
     return result
 
@@ -862,7 +889,7 @@ def _raise_runtime_abort(message: str) -> None:
     raise RuntimeMemoryAbort(message)
 
 
-def _non_negative_int(value: Any, key: str) -> int:
+def _non_negative_int(value: Any, key: str, *, max_value: int | None = None) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -877,6 +904,13 @@ def _non_negative_int(value: Any, key: str) -> int:
         raise RuntimeMemoryAbort(
             f"Wan2.2 config field {key}={result} must be zero or a positive integer; "
             "refusing to construct MLX model"
+        )
+    if max_value is not None and result > max_value:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"Wan2.2 config field {key}={result} exceeds safe structural dimension "
+            f"{max_value}; refusing to construct MLX model"
         )
     return result
 
@@ -909,7 +943,13 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
         pass
 
 
-def _positive_int_tuple(value: Any, key: str, *, length: int) -> tuple[int, ...]:
+def _positive_int_tuple(
+    value: Any,
+    key: str,
+    *,
+    length: int,
+    max_value: int | None = None,
+) -> tuple[int, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != length:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -917,7 +957,10 @@ def _positive_int_tuple(value: Any, key: str, *, length: int) -> tuple[int, ...]
             f"Wan2.2 config field {key} must be a {length}-item positive integer tuple; "
             "refusing to construct MLX model"
         )
-    return tuple(_positive_int(item, f"{key}[{index}]") for index, item in enumerate(value))
+    return tuple(
+        _positive_int(item, f"{key}[{index}]", max_value=max_value)
+        for index, item in enumerate(value)
+    )
 
 
 def _validate_wan_shape_config(config: Any) -> None:
@@ -930,4 +973,5 @@ def _validate_wan_shape_config(config: Any) -> None:
         "vae_stride[2]": config.vae_stride[2],
         "vae_z_dim": config.vae_z_dim,
     }.items():
-        _positive_int(value, key)
+        _positive_int(value, key, max_value=_MAX_CONFIG_DIMENSION)
+    _non_negative_int(config.max_area, "max_area", max_value=_MAX_CONFIG_AREA)

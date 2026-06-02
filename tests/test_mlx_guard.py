@@ -6067,6 +6067,60 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         limits.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("patch_size", [1, 65_537, 2], r"patch_size\[1\]=65537 exceeds safe structural dimension"),
+            ("vae_stride", [4, 65_537, 16], r"vae_stride\[1\]=65537 exceeds safe structural dimension"),
+            ("vae_z_dim", 65_537, r"vae_z_dim=65537 exceeds safe structural dimension"),
+            ("max_area", 4096 * 4096 + 1, r"max_area=16777217 exceeds safe structural dimension"),
+        ],
+    )
+    def test_wan22_load_model_rejects_oversized_shape_config_before_mlx_limits(
+        self,
+        tmp_path,
+        monkeypatch,
+        field,
+        value,
+        message,
+    ):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        config = {
+            "patch_size": [1, 2, 2],
+            "vae_stride": [4, 16, 16],
+            "max_area": 0,
+            "vae_z_dim": 48,
+            "dim": 4096,
+            "ffn_dim": 16_384,
+            "num_layers": 1,
+            "num_heads": 1,
+            "text_dim": 4096,
+        }
+        config[field] = value
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        (tmp_path / "tokenizer").mkdir()
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.wan22_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match=message):
+                pipe.load_model()
+
+        limits.assert_not_called()
+
     def test_wan22_load_config_missing_file_does_not_import_mlx_video(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import _load_config
 
