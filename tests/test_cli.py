@@ -2005,6 +2005,34 @@ def test_models_list_uses_env_and_cli_model_dirs(tmp_path, capsys):
     assert "ltx-env" in output
 
 
+def test_models_list_limits_candidate_output(tmp_path, monkeypatch, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    candidates = [
+        cli_module.ModelCandidate(
+            id=f"wan-{index}",
+            name=f"wan-{index}",
+            path=tmp_path / f"wan-{index}",
+            source_root=tmp_path,
+            model_family_guess="wan2.2",
+            markers=("config.json",),
+        )
+        for index in range(cli_module.MAX_MODEL_LIST_CANDIDATES + 1)
+    ]
+
+    monkeypatch.setattr(cli_module, "model_dirs_from_sources", lambda **kwargs: [tmp_path])
+    monkeypatch.setattr(cli_module, "discover_models", lambda roots, *, model: candidates)
+
+    exit_code = main(["models", "list", "--model", "wan2.2", "--env-file", str(env_file)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"{cli_module.MAX_MODEL_LIST_CANDIDATES}. wan-1023" in output
+    assert "wan-1024" not in output
+    assert "[guard] model list limited to 1024 candidates" in output
+
+
 def test_run_records_direct_model_path(tmp_path):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "direct-wan"
@@ -2394,6 +2422,40 @@ def test_models_list_without_model_outputs_all_candidates(tmp_path, capsys):
     assert exit_code == 0
     assert "wan-list-command" in output
     assert "ltx-list-command" in output
+
+
+def test_models_list_bounds_candidate_output(tmp_path, monkeypatch, capsys):
+    limit = 2
+    monkeypatch.setattr(cli_module, "MAX_MODEL_LIST_CANDIDATES", limit)
+    monkeypatch.setattr(
+        cli_module,
+        "model_dirs_from_sources",
+        lambda **kwargs: [tmp_path / "models"],
+    )
+
+    def candidates(roots, *, model=None):
+        for index in range(limit + 2):
+            path = tmp_path / f"{model}-{index}"
+            yield cli_module.ModelCandidate(
+                id=f"{model}-{index}",
+                name=f"{model}-{index}",
+                path=path,
+                source_root=tmp_path,
+                model_family_guess=model or "unknown",
+                markers=("config.json",),
+            )
+
+    monkeypatch.setattr(cli_module, "discover_models", candidates)
+
+    exit_code = main(["models", "list"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "wan2.2-0" in output
+    assert "wan2.2-1" in output
+    assert "wan2.2-2" not in output
+    assert "ltx2.3-0" not in output
+    assert "[guard] model list limited to 2 candidates" in output
 
 
 def test_run_command_missing_required_values_fails_non_interactively():

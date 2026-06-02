@@ -2335,7 +2335,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="wan2.2 latent_init"):
             wan.init_latents(seed=1, width=256, height=256, frames=4)
 
-        assert cleanup_calls == ["clear", "clear"]
+        assert cleanup_calls == ["clear", "clear", "clear", "clear"]
 
     def test_mlx_backend_watchdog_fails_closed_when_guard_unavailable(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.mlx import MLXBackend
@@ -6480,7 +6480,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="non-integer dimension"):
             pipe.decode(FakeLatents())
 
-        assert cleanup_calls == ["cleanup"]
+        assert cleanup_calls == ["cleanup", "cleanup"]
 
     def test_ltx23_decode_rejects_unexpected_frame_shape_before_numpy(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline

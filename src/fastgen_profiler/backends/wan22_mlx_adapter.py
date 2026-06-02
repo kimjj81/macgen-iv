@@ -1117,10 +1117,6 @@ def _normalize_video_frames(np: Any, frames: Any) -> Any:
 
 def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> None:
     if exc is not None:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        if isinstance(exc, RuntimeMemoryAbort):
-            return
         _clear_traceback_frames(exc)
     try:
         from fastgen_profiler.mlx_guard import mlx_cleanup

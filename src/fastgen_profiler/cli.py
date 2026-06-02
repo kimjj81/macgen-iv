@@ -77,6 +77,7 @@ MAX_SUMMARY_FIELD_CHARS = 256
 MAX_SUMMARY_NUMERIC_FIELD_CHARS = 64
 MAX_INTERACTIVE_CHOICE_CHARS = 64
 MAX_INTERACTIVE_TEXT_CHARS = 8_192
+MAX_MODEL_LIST_CANDIDATES = 1_024
 MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
 MAX_CLI_FRAMES = MAX_RUN_FRAMES
 MAX_CLI_STEPS = MAX_RUN_STEPS
@@ -900,6 +901,7 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
     models = (model,) if model else MODEL_CHOICES
     all_candidates = []
     seen_paths: set[str] = set()
+    truncated = False
     for target_model in models:
         roots = model_dirs_from_sources(
             model=target_model,
@@ -912,7 +914,12 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
             if key in seen_paths:
                 continue
             seen_paths.add(key)
+            if len(all_candidates) >= MAX_MODEL_LIST_CANDIDATES:
+                truncated = True
+                break
             all_candidates.append(candidate)
+        if truncated:
+            break
 
     if not all_candidates:
         target = model if model else "wan2.2/ltx2.3"
@@ -925,6 +932,11 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
         typer.echo(
             f"{index}. {data['id']} "
             f"family={data['model_family_guess']} markers={markers} path={data['path']}"
+        )
+    if truncated:
+        typer.echo(
+            f"[guard] model list limited to {MAX_MODEL_LIST_CANDIDATES} candidates; "
+            "narrow --model or --model-dir"
         )
 
 
