@@ -1050,6 +1050,70 @@ class TestAllocationBudget:
         with pytest.raises(RuntimeMemoryAbort, match="host allocation"):
             check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
 
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_host_allocation_fails_closed_when_swap_telemetry_missing(
+        self,
+        mock_snap,
+        mock_cleanup,
+        monkeypatch,
+    ):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        monkeypatch.setattr(mlx_guard.sys, "platform", "darwin")
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.2,
+            swap_files=None,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="swap file state"):
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        mock_cleanup.assert_called_once()
+
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_host_allocation_fails_closed_when_pressure_telemetry_missing(
+        self,
+        mock_snap,
+        mock_cleanup,
+        monkeypatch,
+    ):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        monkeypatch.setattr(mlx_guard.sys, "platform", "darwin")
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=None,
+            swap_files=0,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="memory pressure"):
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        mock_cleanup.assert_called_once()
+
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_host_allocation_aborts_when_pressure_is_critical(self, mock_snap, mock_cleanup):
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.95,
+            swap_files=0,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="pressure at 95"):
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        mock_cleanup.assert_called_once()
+
     def test_video_run_floor_scales_with_shape(self):
         small = estimate_video_run_floor_bytes(width=256, height=256, frames=4, guidance=1.0)
         large = estimate_video_run_floor_bytes(width=1024, height=1024, frames=16, guidance=3.5)

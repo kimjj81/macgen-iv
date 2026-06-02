@@ -678,6 +678,18 @@ def check_host_allocation_headroom(
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
     snap = system_snapshot()
     required_with_reserve = required_bytes + reserve_bytes
+    if sys.platform == "darwin" and snap.swap_files is None:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read macOS swap file state before "
+            f"allocating {required_bytes / 1e9:.1f}GB on host."
+        )
+    if sys.platform == "darwin" and snap.pressure is None:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read macOS memory pressure before "
+            f"allocating {required_bytes / 1e9:.1f}GB on host."
+        )
     if snap.free_bytes is None:
         if sys.platform == "darwin":
             mlx_cleanup()
@@ -686,6 +698,13 @@ def check_host_allocation_headroom(
                 f"allocating {required_bytes / 1e9:.1f}GB on host."
             )
         return snap
+
+    if snap.pressure is not None and snap.pressure > RUNTIME_PRESSURE_ABORT_THRESHOLD:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: pressure at {snap.pressure * 100:.0f}% "
+            f"before allocating {required_bytes / 1e9:.1f}GB on host."
+        )
 
     if snap.free_bytes < required_with_reserve:
         mlx_cleanup()

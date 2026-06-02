@@ -54,6 +54,9 @@ the configured allocator limit, the run must abort and clean up before system
 memory pressure becomes critical.
 If runtime telemetry cannot be captured at all, the watchdog must also abort
 and clean up; unknown memory state during MLX/Metal work is unsafe.
+Large host allocation preflights must follow the same macOS telemetry rule:
+unknown pressure or swap telemetry, or critical pressure, must abort before
+large file reads, tensor materialization, NumPy conversion, or video encoding.
 
 ## Direct Scripts
 
