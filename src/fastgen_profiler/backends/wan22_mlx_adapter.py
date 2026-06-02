@@ -1208,13 +1208,6 @@ def _detach_exception(exc: BaseException) -> None:
         exc.__traceback__ = None
     except Exception:
         pass
-
-
-def _safe_exception_detail(exc: BaseException) -> str:
-    exc_type = type(exc)
-    if exc.args and isinstance(exc.args[0], str):
-        return exc.args[0][:1024]
-    return f"<{exc_type.__module__}.{exc_type.__qualname__}>"
     try:
         exc.__cause__ = None
     except Exception:
@@ -1223,6 +1216,13 @@ def _safe_exception_detail(exc: BaseException) -> str:
         exc.__context__ = None
     except Exception:
         pass
+
+
+def _safe_exception_detail(exc: BaseException) -> str:
+    exc_type = type(exc)
+    if exc.args and isinstance(exc.args[0], str):
+        return exc.args[0][:1024]
+    return f"<{exc_type.__module__}.{exc_type.__qualname__}>"
 
 
 def _positive_int_tuple(

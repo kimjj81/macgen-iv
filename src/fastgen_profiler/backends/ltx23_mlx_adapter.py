@@ -519,6 +519,7 @@ class LTX23MLXPipeline:
         )
 
     def synchronize(self, target: object | None = None) -> None:
+        self._fail_if_runtime_failed("synchronize")
         if target is None:
             return
         mx = sys.modules.get("mlx.core")
