@@ -1,12 +1,20 @@
-"""Scaffolded MLX backend for future model integrations."""
+"""MLX backend — scaffold with runtime memory watchdog.
+
+When a real MLX pipeline adapter is loaded (e.g. wan22_mlx_adapter),
+the denoise loop checks memory each step via check_runtime_memory().
+The stub scaffold also calls it so the guard path is exercised in tests.
+"""
 
 from __future__ import annotations
 
+import logging
 from time import perf_counter
 
 from fastgen_profiler.metrics import MeasurementRecord, REQUIRED_PHASES, RunConfig
 
 from .base import BackendAdapter, timed_section
+
+logger = logging.getLogger("fastgen_profiler.mlx_backend")
 
 
 class MLXBackend(BackendAdapter):
@@ -31,6 +39,17 @@ class MLXBackend(BackendAdapter):
         for phase in REQUIRED_PHASES:
             if phase == "denoise_step":
                 for step_index in range(config.steps):
+                    # Runtime memory watchdog — check every step.
+                    # If memory is critically low, raise RuntimeMemoryAbort
+                    # instead of letting the system hit a watchdog timeout.
+                    try:
+                        from fastgen_profiler.mlx_guard import check_runtime_memory
+                        check_runtime_memory(
+                            label=f"{config.model} step {step_index}/{config.steps}"
+                        )
+                    except ImportError:
+                        pass  # mlx_guard not available (unlikely)
+
                     records.append(
                         self.record(
                             config,

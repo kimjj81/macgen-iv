@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+import sys
 from time import perf_counter
 from typing import Iterator
 
@@ -82,8 +83,16 @@ def synchronize_mlx(target: object | None = None) -> None:
 
 
 def mlx_memory_snapshot() -> dict[str, int | None]:
-    # Importing MLX can initialize native runtime state. Keep the generic
-    # recorder import-free; real MLX integrations can pass explicit memory
-    # values once their pipeline owns the initialized module.
-    return {"active_memory": None, "peak_memory": None, "cache_memory": None}
-
+    # Importing MLX can initialize native runtime state. Only read MLX counters
+    # when a backend has already imported mlx.core in this process.
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
+        return {"active_memory": None, "peak_memory": None, "cache_memory": None}
+    try:
+        return {
+            "active_memory": mx.get_active_memory(),
+            "peak_memory": mx.get_peak_memory(),
+            "cache_memory": mx.get_cache_memory(),
+        }
+    except Exception:
+        return {"active_memory": None, "peak_memory": None, "cache_memory": None}

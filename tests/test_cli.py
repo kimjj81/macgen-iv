@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 
+import fastgen_profiler.cli as cli_module
 from fastgen_profiler.cli import main
 
 
@@ -339,6 +340,64 @@ def test_mlx_scaffold_writes_failed_schema_records(tmp_path):
     assert any(record["error"] for record in records)
     assert all(record["backend"] == "mlx" for record in records)
     assert all(record["model_path"] == str(model_path.resolve()) for record in records)
+
+
+def test_mlx_run_applies_pre_run_memory_guard(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_pre_run_guard",
+        lambda label, config=None: "Memory guard blocked run: test pressure",
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx guarded",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert len(records) == 1
+    assert records[0]["phase"] == "total"
+    assert "Memory guard blocked run" in records[0]["error"]
 
 
 def test_smoke_preset_applies_requested_shape_and_defaults(tmp_path):

@@ -81,7 +81,10 @@ def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
         env_file=env_file,
     )
 
-    assert dirs == [env_dir, family_dir, cli_dir]
+    # env dirs and cli dir must all be present (auto-discovered dirs may also appear)
+    assert env_dir in dirs
+    assert family_dir in dirs
+    assert cli_dir in dirs
 
 
 def test_discovers_default_import_dirs_for_supported_sources(tmp_path, monkeypatch):

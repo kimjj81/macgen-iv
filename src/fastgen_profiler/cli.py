@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from pathlib import Path
 import sys
 import time
 from typing import Annotated
 import uuid
+
+logger = logging.getLogger("fastgen_profiler.cli")
 
 import click
 import typer
@@ -308,9 +311,204 @@ def run_command(options: RunOptions) -> int:
             preset=preset,
             variant_label=_variant_label(preset, preset_run) if preset else "manual",
         )
-        records = Profiler(backend).run(config)
+        if options.backend == "mlx":
+            guard_error = _mlx_pre_run_guard(config.variant_label or "manual", config=config)
+            if guard_error is not None:
+                records = _error_records_for_config(config, error=guard_error)
+                append_jsonl(options.result_jsonl, records)
+                return 1
+
+        memory_aborted = False
+        try:
+            records = Profiler(backend).run(config)
+        except _runtime_memory_abort_type() as exc:
+            memory_aborted = True
+            records = _error_records_for_config(
+                config,
+                error=f"Runtime memory abort: {exc}",
+            )
+        finally:
+            if options.backend == "mlx":
+                _mlx_post_run_cleanup(config.variant_label or "manual")
         append_jsonl(options.result_jsonl, records)
+        if memory_aborted:
+            return 1
     return 0
+
+
+def _runtime_memory_abort_type() -> type[Exception]:
+    try:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+    except ImportError:
+        return RuntimeError
+    return RuntimeMemoryAbort
+
+
+def _error_records_for_config(config: RunConfig, *, error: str) -> list:
+    return [
+        make_record(
+            config,
+            run_id=new_run_id(),
+            timestamp_utc=utc_timestamp(),
+            machine=machine_metadata(),
+            phase="total",
+            seconds=0.0,
+            error=error,
+        )
+    ]
+
+
+def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | None:
+    try:
+        from fastgen_profiler.mlx_guard import (
+            MAX_CONSECUTIVE_RUNS,
+            check_run_allocation_budget,
+            inter_run_recovery,
+            run_counter,
+            should_restart_process,
+        )
+
+        if should_restart_process():
+            return (
+                f"skipped: process restart required after {run_counter()} "
+                "consecutive MLX runs to prevent Metal resource accumulation."
+            )
+
+        recovery = inter_run_recovery(label=label)
+        budget = None
+        if config is not None:
+            budget = check_run_allocation_budget(
+                width=config.width,
+                height=config.height,
+                frames=config.frames,
+                guidance=config.guidance,
+                label=label,
+            )
+        typer.echo(
+            f"[guard] pre-run '{label}': "
+            f"free={recovery.get('free_gb', '?')}GB "
+            f"freed={recovery.get('freed_gb', '?')}GB "
+            f"mlx_limit={recovery.get('memory_limit_gb', '?')}GB "
+            f"cache_limit={recovery.get('cache_limit_gb', '?')}GB "
+            f"shape_floor={(budget or {}).get('shape_floor_gb', '?')}GB "
+            f"run={recovery.get('run_number', '?')}/{MAX_CONSECUTIVE_RUNS}"
+        )
+    except ImportError:
+        return None
+    except Exception as exc:
+        return f"Memory guard blocked run: {exc}"
+    return None
+
+
+def _mlx_post_run_cleanup(label: str) -> object | None:
+    try:
+        from fastgen_profiler.mlx_guard import increment_run_counter, mlx_cleanup, system_snapshot
+
+        cleanup = mlx_cleanup()
+        completed_runs = increment_run_counter()
+        snap = system_snapshot()
+        typer.echo(
+            f"[guard] post-run '{label}': run={completed_runs} "
+            f"{snap.summary()} freed={cleanup.get('freed_gb', '?')}GB"
+        )
+        return snap
+    except ImportError:
+        return None
+
+
+def _adaptive_adjust_spec(
+    spec: ProfileRunSpec,
+    adaptive_state: dict[str, object],
+    *,
+    backend_name: str,
+) -> ProfileRunSpec:
+    """Adjust a ProfileRunSpec based on memory headroom from previous runs.
+
+    If the previous post-run snapshot showed low memory headroom, shrink
+    frames/steps to prevent kernel watchdog timeout. If headroom is good,
+    leave the spec unchanged (or grow toward original target).
+
+    This only applies to the mlx backend — stub runs are never adjusted.
+    """
+    if backend_name != "mlx":
+        return spec
+
+    last_snap = adaptive_state.get("last_snapshot")
+    if last_snap is None:
+        # No previous snapshot — first spec runs at original size.
+        return spec
+
+    from fastgen_profiler.mlx_guard import SystemSnapshot
+
+    if not isinstance(last_snap, SystemSnapshot):
+        return spec
+
+    # Compute headroom: free_fraction if available, else inverse of pressure.
+    headroom: float | None = None
+    if last_snap.free_fraction is not None:
+        headroom = last_snap.free_fraction
+    elif last_snap.pressure is not None:
+        headroom = 1.0 - last_snap.pressure
+
+    if headroom is None:
+        return spec
+
+    original_frames = spec.run.frames
+    original_steps = spec.run.steps
+
+    # Thresholds
+    SHRINK_BELOW = 0.15  # <15% free → halve frames/steps
+    GROW_ABOVE = 0.35    # >35% free → grow toward original if we shrunk before
+
+    shrunk_specs: set = adaptive_state.get("shrunk_specs", set())  # type: ignore[assignment]
+
+    if headroom < SHRINK_BELOW:
+        # Danger zone: cut frames and steps in half (minimum 4 frames, 2 steps).
+        new_frames = max(4, original_frames // 2)
+        new_steps = max(2, original_steps // 2)
+        shrunk_specs.add(spec.variant_label)
+        typer.echo(
+            f"[adaptive] low headroom ({headroom * 100:.0f}%): "
+            f"shrinking {spec.variant_label} "
+            f"{original_frames}f/{original_steps}s -> {new_frames}f/{new_steps}s"
+        )
+    elif headroom > GROW_ABOVE and spec.variant_label in shrunk_specs:
+        # Recovered: restore original size.
+        new_frames = original_frames
+        new_steps = original_steps
+        shrunk_specs.discard(spec.variant_label)
+        typer.echo(
+            f"[adaptive] good headroom ({headroom * 100:.0f}%): "
+            f"restoring {spec.variant_label} to {new_frames}f/{new_steps}s"
+        )
+    elif headroom < 0.25 and spec.variant_label not in shrunk_specs:
+        # Moderate pressure: reduce by 25%.
+        new_frames = max(4, int(original_frames * 0.75))
+        new_steps = max(2, int(original_steps * 0.75))
+        shrunk_specs.add(spec.variant_label)
+        typer.echo(
+            f"[adaptive] moderate pressure ({headroom * 100:.0f}%): "
+            f"reducing {spec.variant_label} "
+            f"{original_frames}f/{original_steps}s -> {new_frames}f/{new_steps}s"
+        )
+    else:
+        return spec
+
+    return ProfileRunSpec(
+        preset=spec.preset,
+        variant_label=spec.variant_label,
+        run=PresetRun(
+            width=spec.run.width,
+            height=spec.run.height,
+            frames=new_frames,
+            steps=new_steps,
+            guidance=spec.run.guidance,
+            quant=spec.run.quant,
+            cache=spec.run.cache,
+            compile=spec.run.compile,
+            save_video=spec.run.save_video,
+        ),
+    )
 
 
 def profile_command(options: RunOptions) -> int:
@@ -340,17 +538,70 @@ def profile_command(options: RunOptions) -> int:
 
     backend = create_backend(options.backend)
     all_records = []
+
+    # Guard state: tracks memory headroom across specs.
+    adaptive_state: dict[str, object] = {
+        "last_snapshot": None,
+        "shrunk_specs": set(),
+    }
+    memory_guard_failed = False
+
     for spec in specs:
+        spec_label = spec.variant_label
+
+        # Guard 2: Adaptive batch sizing.
+        effective_spec = _adaptive_adjust_spec(
+            spec, adaptive_state, backend_name=options.backend,
+        )
+
         config = _profile_run_config(
             options=options,
             candidate=candidate,
             profile_id=profile_id,
             profile_name=profile_name,
-            spec=spec,
+            spec=effective_spec,
         )
-        records = Profiler(backend).run(config)
+
+        if options.backend == "mlx":
+            guard_error = _mlx_pre_run_guard(spec_label, config=config)
+            if guard_error is not None:
+                memory_guard_failed = True
+                typer.echo(f"[guard] pre-run '{spec_label}' blocked: {guard_error}")
+                records = _profile_error_records(
+                    options=options,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    spec=effective_spec,
+                    error=guard_error,
+                )
+                append_jsonl(options.result_jsonl, records)
+                all_records.extend(record.to_dict() for record in records)
+                break
+
+        memory_aborted = False
+        try:
+            records = Profiler(backend).run(config)
+        except _runtime_memory_abort_type() as exc:
+            memory_aborted = True
+            memory_guard_failed = True
+            logger.warning(f"Runtime memory abort for '{spec_label}': {exc}")
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=f"Runtime memory abort: {exc}",
+            )
+        finally:
+            if options.backend == "mlx":
+                snap = _mlx_post_run_cleanup(spec_label)
+                if snap is not None:
+                    adaptive_state["last_snapshot"] = snap
+
         append_jsonl(options.result_jsonl, records)
         all_records.extend(record.to_dict() for record in records)
+        if memory_aborted:
+            break
 
     for spec in skipped_specs:
         records = _skipped_profile_records(
@@ -366,7 +617,7 @@ def profile_command(options: RunOptions) -> int:
     report_path = options.result_jsonl.with_suffix(".md")
     report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
     _print_profile_summary(all_records, options.result_jsonl, report_path)
-    return 0
+    return 1 if memory_guard_failed else 0
 
 
 def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_file: Path) -> None:

@@ -83,6 +83,9 @@ def model_dirs_from_sources(
     elif model == "ltx2.3":
         dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_LTX23")))
 
+    # Auto-discover from well-known sources (DrawThings, HuggingFace cache, etc.)
+    dirs.extend(discover_import_dirs("all"))
+
     if cli_dirs:
         dirs.extend(cli_dirs)
 
@@ -150,6 +153,16 @@ def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[
                 candidates.append(candidate)
             elif _is_generation_model_candidate(candidate, model=model):
                 candidates.append(candidate)
+
+        # DrawThings-style flat directory: individual model files in a single dir.
+        # When a directory contains .ckpt/.safetensors files that match the target
+        # model family but the directory itself has no family name, create per-file
+        # candidates.
+        if model is not None:
+            for file_candidate in _discover_flat_model_files(root, model=model):
+                if file_candidate not in candidates:
+                    candidates.append(file_candidate)
+
     return sorted(candidates, key=lambda item: (item.model_family_guess == "unknown", item.id))
 
 
@@ -220,6 +233,41 @@ def _walk_dirs(root: Path) -> Iterable[Path]:
             name for name in dir_names if name not in SKIP_DIR_NAMES and not name.startswith(".")
         ]
         yield Path(current)
+
+
+def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate]:
+    """Find individual model files in a flat directory (DrawThings-style).
+
+    When all model weights live as .ckpt/.safetensors/.gguf files in one
+    directory (no subdirectories per model), the directory-level discovery
+    won't match because the directory name has no model family info.
+    Instead, create one candidate per matching file.
+    """
+    candidates: list[ModelCandidate] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+
+    model_suffixes = {".ckpt", ".safetensors", ".gguf", ".mlx"}
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() not in model_suffixes:
+            continue
+        family = guess_model_family(entry)
+        if family != model:
+            continue
+        candidate = ModelCandidate(
+            id=entry.name,
+            name=entry.name,
+            path=entry.resolve(),
+            source_root=root.resolve(),
+            model_family_guess=family,
+            markers=(f"*{entry.suffix.lower()}",),
+        )
+        candidates.append(candidate)
+    return candidates
 
 
 def _markers(path: Path) -> tuple[str, ...]:
