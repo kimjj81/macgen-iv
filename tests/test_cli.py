@@ -479,6 +479,40 @@ def test_profile_summary_summarizes_unknown_values_without_repr_or_str():
     assert "UnsafeValue" in recommendation
 
 
+def test_profile_summary_does_not_coerce_unknown_numeric_values():
+    class UnsafeNumeric:
+        def __float__(self):
+            raise AssertionError("profile summary must not call float on unknown values")
+
+        def __int__(self):
+            raise AssertionError("profile summary must not call int on unknown values")
+
+        def __repr__(self):
+            raise AssertionError("profile summary must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("profile summary must not call str on unknown values")
+
+    records = [
+        {
+            "run_id": "unsafe-numeric",
+            "preset": "smoke",
+            "variant_label": "manual",
+            "phase": "total",
+            "seconds": UnsafeNumeric(),
+            "peak_memory": UnsafeNumeric(),
+            "error": None,
+        }
+    ]
+
+    rows = cli_module._profile_summary_rows(records)
+    recommendation = cli_module._profile_recommendation(records)
+
+    assert rows[0]["total"] == 0.0
+    assert rows[0]["peak_memory"] == "unavailable"
+    assert recommendation == "no phase timing data available"
+
+
 def test_profile_command_runs_full_wan_suite_and_writes_comparison_report(tmp_path, capsys):
     results_dir = tmp_path / "profiles"
 

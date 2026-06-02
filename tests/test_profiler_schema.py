@@ -491,6 +491,41 @@ def test_markdown_report_summarizes_unknown_values_without_repr_or_str():
     assert "UnsafeValue" in report
 
 
+def test_markdown_report_does_not_coerce_unknown_numeric_values():
+    class UnsafeNumeric:
+        def __float__(self):
+            raise AssertionError("markdown report must not call float on unknown values")
+
+        def __int__(self):
+            raise AssertionError("markdown report must not call int on unknown values")
+
+        def __repr__(self):
+            raise AssertionError("markdown report must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("markdown report must not call str on unknown values")
+
+    records = [
+        {
+            "run_id": "unsafe-numeric",
+            "preset": "manual",
+            "variant_label": "manual",
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "total",
+            "seconds": UnsafeNumeric(),
+            "peak_memory": UnsafeNumeric(),
+            "error": None,
+        }
+    ]
+
+    report = render_markdown_report(records)
+
+    assert "0.000000" in report
+    assert "unavailable" in report
+    assert "UnsafeNumeric" not in report
+
+
 def test_markdown_report_rejects_too_many_runs_before_rendering_sections():
     from fastgen_profiler.reports.markdown import MAX_REPORT_RUNS
 

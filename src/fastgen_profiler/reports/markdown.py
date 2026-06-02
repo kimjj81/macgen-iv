@@ -217,8 +217,11 @@ def _format_memory(value: int | None) -> str:
 
 
 def _finite_seconds(record: dict[str, Any]) -> float:
+    raw = record["seconds"]
+    if type(raw) not in {int, float, str}:
+        return 0.0
     try:
-        value = float(record["seconds"])
+        value = float(raw)
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(value) or value < 0:
@@ -227,6 +230,8 @@ def _finite_seconds(record: dict[str, Any]) -> float:
 
 
 def _non_negative_int(value: Any) -> int | None:
+    if type(value) not in {int, str}:
+        return None
     try:
         converted = int(value)
     except (TypeError, ValueError):

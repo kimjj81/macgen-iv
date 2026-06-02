@@ -1621,8 +1621,11 @@ def _format_summary_memory(value: int | None) -> str:
 
 
 def _finite_record_seconds(record: dict) -> float:
+    raw = record["seconds"]
+    if type(raw) not in {int, float, str}:
+        return 0.0
     try:
-        value = float(record["seconds"])
+        value = float(raw)
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(value) or value < 0:
@@ -1633,6 +1636,8 @@ def _finite_record_seconds(record: dict) -> float:
 def _non_negative_record_int(record: dict, key: str) -> int | None:
     value = record.get(key)
     if value is None:
+        return None
+    if type(value) not in {int, str}:
         return None
     try:
         converted = int(value)
