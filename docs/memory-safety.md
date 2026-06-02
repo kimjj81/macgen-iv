@@ -16,10 +16,9 @@ Before a process imports `mlx.core` for a model run, it must:
 
 System telemetry helpers may return unknown values when OS commands fail, but
 must not leak raw telemetry exceptions past the guard layer. On macOS, unknown
-free-memory telemetry must fail closed before MLX/Metal work starts.
-Unknown macOS swap-file telemetry must also fail closed before and during
-MLX/Metal work; high free memory is not enough when swap state cannot be
-verified.
+free-memory, memory-pressure, or swap-file telemetry must fail closed before
+MLX/Metal work starts and during MLX/Metal runtime checks; high free memory is
+not enough when pressure or swap state cannot be verified.
 `configure_mlx_resource_limits()` must also enforce the pre-run system gate
 itself, so direct calls cannot probe or import MLX while free memory, pressure,
 or swap state is already unsafe.

@@ -284,6 +284,22 @@ class TestCheckMemoryGuard:
         with pytest.raises(MemoryGuardError, match="swap file state"):
             check_memory_guard(label="blind-swap")
 
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_darwin_fails_closed_when_pressure_telemetry_unavailable(self, mock_snap, monkeypatch):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        monkeypatch.setattr(mlx_guard.sys, "platform", "darwin")
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=None,
+            swap_files=0,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(MemoryGuardError, match="memory pressure"):
+            check_memory_guard(label="blind-pressure")
+
 
 # ---------------------------------------------------------------------------
 # Runtime watchdog (Guard 3)
@@ -468,6 +484,30 @@ class TestCheckRuntimeMemory:
 
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_darwin_runtime_fails_closed_when_pressure_telemetry_unavailable(
+        self,
+        mock_snap,
+        mock_cleanup,
+        monkeypatch,
+    ):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        monkeypatch.setattr(mlx_guard.sys, "platform", "darwin")
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=None,
+            swap_files=0,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="pressure telemetry is unavailable"):
+            check_runtime_memory(label="runtime-blind-pressure")
+
+        mock_cleanup.assert_called_once()
+
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_runtime_fails_closed_when_mlx_allocator_telemetry_fails(
         self,
         mock_snap,
@@ -593,7 +633,7 @@ class TestConfigureMlxResourceLimits:
             snapshot=SystemSnapshot(
                 free_bytes=80 * 1024 ** 3,
                 total_bytes=128 * 1024 ** 3,
-                pressure=None,
+                pressure=0.2,
                 swap_files=0,
                 free_fraction=None,
             ),
@@ -616,7 +656,7 @@ class TestConfigureMlxResourceLimits:
                 snapshot=SystemSnapshot(
                     free_bytes=80 * 1024 ** 3,
                     total_bytes=128 * 1024 ** 3,
-                    pressure=None,
+                    pressure=0.2,
                     swap_files=0,
                     free_fraction=None,
                 ),
@@ -645,7 +685,7 @@ class TestConfigureMlxResourceLimits:
                 snapshot=SystemSnapshot(
                     free_bytes=80 * 1024 ** 3,
                     total_bytes=128 * 1024 ** 3,
-                    pressure=None,
+                    pressure=0.2,
                     swap_files=0,
                     free_fraction=None,
                 ),
@@ -665,7 +705,7 @@ class TestConfigureMlxResourceLimits:
                 snapshot=SystemSnapshot(
                     free_bytes=80 * 1024 ** 3,
                     total_bytes=128 * 1024 ** 3,
-                    pressure=None,
+                    pressure=0.2,
                     swap_files=0,
                     free_fraction=None,
                 ),
@@ -692,7 +732,7 @@ class TestConfigureMlxResourceLimits:
             snapshot=SystemSnapshot(
                 free_bytes=80 * 1024 ** 3,
                 total_bytes=128 * 1024 ** 3,
-                pressure=None,
+                pressure=0.2,
                 swap_files=0,
                 free_fraction=None,
             ),
@@ -720,7 +760,7 @@ class TestConfigureMlxResourceLimits:
             snapshot=SystemSnapshot(
                 free_bytes=80 * 1024 ** 3,
                 total_bytes=128 * 1024 ** 3,
-                pressure=None,
+                pressure=0.2,
                 swap_files=0,
                 free_fraction=None,
             ),
@@ -850,7 +890,7 @@ class TestConfigureMlxResourceLimits:
             snapshot=SystemSnapshot(
                 free_bytes=16 * 1024 ** 3,
                 total_bytes=16 * 1024 ** 3,
-                pressure=None,
+                pressure=0.2,
                 swap_files=0,
                 free_fraction=None,
             ),
@@ -873,7 +913,7 @@ class TestConfigureMlxResourceLimits:
             snapshot=SystemSnapshot(
                 free_bytes=128 * 1024 ** 3,
                 total_bytes=128 * 1024 ** 3,
-                pressure=None,
+                pressure=0.2,
                 swap_files=0,
                 free_fraction=None,
             ),

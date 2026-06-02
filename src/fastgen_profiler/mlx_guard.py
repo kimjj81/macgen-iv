@@ -349,6 +349,11 @@ def _validate_pre_run_snapshot(
             f"Memory guard [{label}]: cannot read macOS swap file state. "
             "Refusing to start an MLX/Metal run without swap telemetry."
         )
+    if sys.platform == "darwin" and snap.pressure is None:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot read macOS memory pressure. "
+            "Refusing to start an MLX/Metal run without pressure telemetry."
+        )
 
     if snap.free_bytes is not None and snap.free_bytes < min_free_bytes:
         raise MemoryGuardError(
@@ -546,6 +551,11 @@ def check_memory_guard(
             f"Memory guard [{label}]: cannot read macOS swap file state. "
             "Refusing to start an MLX/Metal run without swap telemetry."
         )
+    if sys.platform == "darwin" and snap.pressure is None:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot read macOS memory pressure. "
+            "Refusing to start an MLX/Metal run without pressure telemetry."
+        )
 
     if snap.free_bytes is not None and snap.free_bytes < min_free_bytes:
         raise MemoryGuardError(
@@ -605,6 +615,12 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot read macOS swap file state "
             "during MLX/Metal run. Aborting because swap telemetry is unavailable."
+        )
+    if sys.platform == "darwin" and snap.pressure is None:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot read macOS memory pressure "
+            "during MLX/Metal run. Aborting because pressure telemetry is unavailable."
         )
 
     if snap.free_bytes is not None and snap.free_bytes < RUNTIME_MIN_FREE_BYTES:
