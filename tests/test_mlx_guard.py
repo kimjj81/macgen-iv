@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
+from pathlib import Path
 import sys
 import types
 
@@ -4872,6 +4873,50 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_wan22_denoise_rejects_unsafe_step_arguments_without_repr(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class UnsafeStep:
+            def __repr__(self):
+                raise AssertionError("invalid denoise step arguments must not call repr")
+
+            def __str__(self):
+                raise AssertionError("invalid denoise step arguments must not call str")
+
+        class FakeLatents:
+            shape = (16, 1, 1, 1)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = object()
+        pipe.model = object()
+        pipe.scheduler = object()
+        pipe.latent_shape = (16, 1, 1, 1)
+        pipe.seq_len = 1
+        pipe.cross_kv = object()
+        pipe.rope_cos_sin = object()
+        pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("memory check must not run for invalid denoise arguments")
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeStep"):
+            pipe.denoise_step(FakeLatents(), step_index=UnsafeStep(), steps=1, guidance=1.0, cache="none")
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_wan22_denoise_indexes_scheduler_timestep_without_materializing_all_timesteps(
         self,
         tmp_path,
@@ -4995,6 +5040,46 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeMemoryAbort, match="LTX2.3 denoise step arguments"):
             pipe.denoise_step(FakeLatents(), step_index=step_index, steps=steps, guidance=1.0, cache="none")
+
+        assert cleanup_calls == ["cleanup"]
+
+    def test_ltx23_denoise_rejects_unsafe_step_arguments_without_repr(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class UnsafeStep:
+            def __repr__(self):
+                raise AssertionError("invalid denoise step arguments must not call repr")
+
+            def __str__(self):
+                raise AssertionError("invalid denoise step arguments must not call str")
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("memory check must not run for invalid denoise arguments")
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeStep"):
+            pipe.denoise_step(FakeLatents(), step_index=UnsafeStep(), steps=1, guidance=1.0, cache="none")
 
         assert cleanup_calls == ["cleanup"]
 
@@ -7548,3 +7633,48 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(MemoryGuardError, match="exceeded 0 files"):
             ensure_text_encoder(tmp_path)
+
+    def test_ltx23_text_encoder_auto_download_runs_memory_guard_before_network(self, tmp_path, monkeypatch):
+        import fastgen_profiler.mlx_guard as mlx_guard_module
+        from fastgen_profiler.backends.ltx23_text_encoder_download import ensure_text_encoder
+
+        calls: list[str] = []
+
+        def fake_check_memory_guard(*, label):
+            calls.append(f"guard:{label}")
+            return {"free_gb": 100}
+
+        def fake_snapshot_download(**kwargs):
+            calls.append("download")
+            local_dir = Path(kwargs["local_dir"])
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "model.safetensors").write_bytes(b"x")
+            (local_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+        hub = types.ModuleType("huggingface_hub")
+        hub.snapshot_download = fake_snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+        monkeypatch.setattr(mlx_guard_module, "check_memory_guard", fake_check_memory_guard)
+
+        ensure_text_encoder(tmp_path, auto_download=True)
+
+        assert calls == ["guard:ltx2.3 text_encoder auto-download", "download"]
+
+    def test_ltx23_text_encoder_auto_download_stops_when_memory_guard_fails(self, tmp_path, monkeypatch):
+        import fastgen_profiler.mlx_guard as mlx_guard_module
+        from fastgen_profiler.backends.ltx23_text_encoder_download import ensure_text_encoder
+
+        def fake_check_memory_guard(*, label):
+            raise MemoryGuardError(f"{label} blocked")
+
+        def fake_snapshot_download(**kwargs):
+            raise AssertionError("snapshot_download must not run when memory guard fails")
+
+        hub = types.ModuleType("huggingface_hub")
+        hub.snapshot_download = fake_snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+        monkeypatch.setattr(mlx_guard_module, "check_memory_guard", fake_check_memory_guard)
+
+        with pytest.raises(MemoryGuardError, match="text_encoder auto-download blocked"):
+            ensure_text_encoder(tmp_path, auto_download=True)

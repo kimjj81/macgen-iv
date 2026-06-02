@@ -31,6 +31,8 @@ def ensure_text_encoder(
     if not auto_download:
         _raise_missing(text_encoder_dir, tokenizer_dir)
 
+    _preflight_auto_download(dest_dir)
+
     # ── Auto-download ──────────────────────────────────────────────
     try:
         from huggingface_hub import snapshot_download
@@ -77,6 +79,15 @@ def ensure_text_encoder(
 
     print("[macgen-iv] Text encoder download complete.")
     return text_encoder_dir, tokenizer_dir
+
+
+def _preflight_auto_download(dest_dir: Path) -> None:
+    from fastgen_profiler.mlx_guard import check_memory_guard
+
+    check_memory_guard(label="ltx2.3 text_encoder auto-download")
+    if dest_dir.exists():
+        for _ in _bounded_files(dest_dir, "preflight auto-download destination"):
+            pass
 
 
 def _is_text_encoder_ready(te_dir: Path, tok_dir: Path) -> bool:

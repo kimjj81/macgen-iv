@@ -219,7 +219,8 @@ class Wan22MLXPipeline:
     def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
         if not isinstance(steps, int) or isinstance(steps, bool):
             _raise_runtime_abort(
-                f"Wan2.2 denoise step arguments are invalid: steps must be an integer, got {steps!r}"
+                "Wan2.2 denoise step arguments are invalid: steps must be an integer, "
+                f"got {_shape_dim_text(steps)}"
             )
         if steps <= 0:
             _raise_runtime_abort(
@@ -232,7 +233,8 @@ class Wan22MLXPipeline:
             )
         if not isinstance(step_index, int) or isinstance(step_index, bool):
             _raise_runtime_abort(
-                f"Wan2.2 denoise step arguments are invalid: step_index must be an integer, got {step_index!r}"
+                "Wan2.2 denoise step arguments are invalid: step_index must be an integer, "
+                f"got {_shape_dim_text(step_index)}"
             )
         if step_index < 0 or step_index >= steps:
             _raise_runtime_abort(
