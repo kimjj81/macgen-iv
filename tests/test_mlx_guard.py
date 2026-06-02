@@ -100,6 +100,7 @@ def _install_fake_transformers_tokenizer(monkeypatch, *, token_count=2):
     transformers_module = types.ModuleType("transformers")
     transformers_module.AutoTokenizer = FakeAutoTokenizer
     monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    monkeypatch.setitem(sys.modules, "mlx_lm", types.ModuleType("mlx_lm"))
 
 
 # ---------------------------------------------------------------------------
@@ -4283,6 +4284,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+        monkeypatch.setitem(sys.modules, "mlx_lm", types.ModuleType("mlx_lm"))
         monkeypatch.setattr(builtins, "__import__", guarded_import)
 
         pipe = LTX23MLXPipeline(
