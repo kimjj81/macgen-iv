@@ -405,13 +405,22 @@ def _exception_cleanup_done(exc: BaseException) -> bool:
 
 
 def _cleanup_after_exception(exc: BaseException) -> dict[str, object]:
-    cleanup = mlx_cleanup()
     try:
         setattr(exc, _CLEANUP_DONE_ATTR, True)
     except Exception:
         pass
     _detach_exception(exc)
-    return cleanup
+    try:
+        return mlx_cleanup()
+    except Exception as cleanup_exc:
+        cleanup_error = _safe_exception_text(cleanup_exc)
+        _clear_exception_traceback_frames(cleanup_exc)
+        _detach_exception(cleanup_exc)
+        return {
+            "mlx_loaded": None,
+            "mlx_cache_cleared": False,
+            "mlx_cleanup_error": f"mlx_cleanup raised: {cleanup_error}",
+        }
 
 
 def _detach_exception(exc: BaseException) -> None:
@@ -474,12 +483,15 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
             f"decoded benchmark video has no shape for {label}; refusing unbounded shape inspection"
         )
     dims: list[int] = []
+    abort = None
     try:
         iterator = iter(shape)
-    except TypeError as exc:
-        raise RuntimeMemoryAbort(
+    except TypeError:
+        abort = RuntimeMemoryAbort(
             f"decoded benchmark video shape is not iterable for {label}; refusing unbounded shape inspection"
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
     for dim in iterator:
         if len(dims) >= expected_rank:
             raise RuntimeMemoryAbort(

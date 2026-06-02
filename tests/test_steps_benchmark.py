@@ -353,6 +353,58 @@ def test_steps_benchmark_child_abort_records_cleanup_status(tmp_path, monkeypatc
     ]
 
 
+def test_steps_benchmark_child_abort_records_cleanup_failure(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_child_cleanup_failure_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    result_path = tmp_path / "steps" / "child.json"
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_RESULT", str(result_path))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_STEP", "1")
+    spec.loader.exec_module(module)
+
+    cleanup_errors: list[RuntimeError] = []
+
+    def cleanup():
+        exc = RuntimeError("cleanup failed")
+        cleanup_errors.append(exc)
+        raise exc
+
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(module.RuntimeMemoryAbort("runtime stop")),
+    )
+    monkeypatch.setattr(module, "mlx_cleanup", cleanup)
+
+    assert module.run_child() == 0
+
+    records = [
+        json.loads(line)
+        for line in result_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records == [
+        {
+            "steps": 1,
+            "error": "runtime stop",
+            "aborted": True,
+            "cleanup": {
+                "mlx_loaded": None,
+                "mlx_cache_cleared": False,
+                "mlx_cleanup_error": "mlx_cleanup raised: cleanup failed",
+            },
+        }
+    ]
+    assert cleanup_errors
+    assert cleanup_errors[0].__traceback__ is None
+    assert cleanup_errors[0].__cause__ is None
+    assert cleanup_errors[0].__context__ is None
+
+
 def test_steps_benchmark_child_abort_with_completed_cleanup_does_not_cleanup_again(tmp_path, monkeypatch):
     import importlib.util
 
@@ -1311,6 +1363,41 @@ def test_steps_benchmark_eval_failure_clears_cause_traceback_before_cleanup(tmp_
     assert caught.value.__context__ is None
 
 
+def test_steps_benchmark_eval_failure_fails_closed_when_cleanup_fails(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_eval_cleanup_failure_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+
+    class FakeMx:
+        def eval(self, target):
+            raise RuntimeError("metal eval failed")
+
+    cleanup_errors: list[RuntimeError] = []
+
+    def cleanup():
+        exc = RuntimeError("cleanup failed")
+        cleanup_errors.append(exc)
+        raise exc
+
+    monkeypatch.setattr(module, "mlx_cleanup", cleanup)
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed") as caught:
+        module._eval_mlx(FakeMx(), object(), label="eval cleanup")
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert cleanup_errors
+    assert cleanup_errors[0].__traceback__ is None
+    assert cleanup_errors[0].__cause__ is None
+    assert cleanup_errors[0].__context__ is None
+
+
 def test_steps_benchmark_child_cleanup_clears_traceback_locals_before_mlx_cleanup(tmp_path, monkeypatch):
     import gc
     import importlib.util
@@ -1536,6 +1623,28 @@ def test_steps_benchmark_rejects_unbounded_video_shape_metadata(tmp_path, monkey
 
     with pytest.raises(module.RuntimeMemoryAbort, match="shape rank"):
         module._check_decoded_video_shape(FakeVideo(), label="steps_1")
+
+
+def test_steps_benchmark_rejects_non_iterable_video_shape_without_exception_chain(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_non_iterable_shape_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    spec.loader.exec_module(module)
+
+    class FakeVideo:
+        shape = object()
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="shape is not iterable") as caught:
+        module._check_decoded_video_shape(FakeVideo(), label="steps_1")
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_steps_benchmark_rejects_short_video_shape_metadata(tmp_path, monkeypatch):
