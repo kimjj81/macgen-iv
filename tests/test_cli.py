@@ -2322,6 +2322,22 @@ def test_interactive_main_menu_list_models_outputs_all_candidates_without_prompt
     assert "ltx-menu" in output
 
 
+def test_interactive_main_menu_rejects_oversized_selection_before_parsing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    class InteractiveStdin:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
+    monkeypatch.setattr("builtins.input", lambda _: "1" * 10_000)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([])
+
+    assert "command selection must be no longer than 64 chars" in str(exc_info.value)
+
+
 def test_run_command_prompts_for_missing_required_values_interactively(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
@@ -2337,6 +2353,23 @@ def test_run_command_prompts_for_missing_required_values_interactively(tmp_path,
 
     assert exit_code == 0
     assert (tmp_path / "artifacts/results.jsonl").exists()
+
+
+def test_run_command_rejects_oversized_interactive_int_before_parsing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    class InteractiveStdin:
+        def isatty(self):
+            return True
+
+    answers = iter(["", "", "", "", "1" * 10_000])
+    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run"])
+
+    assert "Seed must be no longer than 64 chars" in str(exc_info.value)
 
 
 def test_models_command_without_subcommand_lists_interactively(tmp_path, monkeypatch, capsys):

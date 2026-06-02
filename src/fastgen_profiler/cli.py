@@ -75,6 +75,8 @@ DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
 MAX_SUMMARY_FIELD_CHARS = 256
 MAX_SUMMARY_NUMERIC_FIELD_CHARS = 64
+MAX_INTERACTIVE_CHOICE_CHARS = 64
+MAX_INTERACTIVE_TEXT_CHARS = 8_192
 MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
 MAX_CLI_FRAMES = MAX_RUN_FRAMES
 MAX_CLI_STEPS = MAX_RUN_STEPS
@@ -1118,7 +1120,11 @@ def interactive_main_menu() -> int:
         typer.echo("2. List models")
         typer.echo("3. Import model directories")
         typer.echo("4. Exit")
-        choice = input("Command number: ").strip()
+        choice = _input_stripped(
+            "Command number: ",
+            label="command selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice == "1":
             return interactive_run_profile()
         if choice == "2":
@@ -1140,7 +1146,11 @@ def interactive_import_model_dirs() -> int:
     for path in found:
         typer.echo(f"- {path}")
 
-    confirm = input("Save these directories to .env? [y/N]: ").strip().lower()
+    confirm = _input_stripped(
+        "Save these directories to .env? [y/N]: ",
+        label="import confirmation",
+        max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+    ).lower()
     if confirm not in {"y", "yes"}:
         typer.echo("Import cancelled.")
         return 0
@@ -1200,7 +1210,11 @@ def _select_preset_if_needed(options: RunOptions) -> str | None:
     for index, preset in enumerate(PRESET_CHOICES, start=1):
         typer.echo(f"{index}. {preset}")
     while True:
-        choice = input("Preset number: ").strip()
+        choice = _input_stripped(
+            "Preset number: ",
+            label="preset selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice.isdigit():
             index = int(choice)
             if 1 <= index <= len(PRESET_CHOICES):
@@ -1729,7 +1743,11 @@ def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
     for index, candidate in enumerate(candidates, start=1):
         typer.echo(f"{index}. {candidate.id} ({candidate.model_family_guess}) {candidate.path}")
     while True:
-        choice = input("Model number: ").strip()
+        choice = _input_stripped(
+            "Model number: ",
+            label="model selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice.isdigit():
             index = int(choice)
             if 1 <= index <= len(candidates):
@@ -1822,7 +1840,11 @@ def _import_model_dirs(
         typer.echo("Dry run: .env was not modified.")
         return 0
     if require_confirmation:
-        confirm = input(f"Save to {env_file}? [y/N]: ").strip().lower()
+        confirm = _input_stripped(
+            f"Save to {env_file}? [y/N]: ",
+            label="import confirmation",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        ).lower()
         if confirm not in {"y", "yes"}:
             typer.echo("Import cancelled.")
             return 0
@@ -1861,7 +1883,11 @@ def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
         suffix = " (default)" if choice == default else ""
         typer.echo(f"{index}. {choice}{suffix}")
     while True:
-        raw = input(f"{label} [{default}]: ").strip()
+        raw = _input_stripped(
+            f"{label} [{default}]: ",
+            label=label,
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if not raw:
             return default
         if raw.isdigit():
@@ -1875,19 +1901,34 @@ def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
 
 
 def _prompt_text(label: str, default: str) -> str:
-    raw = input(f"{label} [{default}]: ").strip()
+    raw = _input_stripped(
+        f"{label} [{default}]: ",
+        label=label,
+        max_chars=MAX_INTERACTIVE_TEXT_CHARS,
+    )
     return raw or default
 
 
 def _prompt_int(label: str, default: int) -> int:
     while True:
-        raw = input(f"{label} [{default}]: ").strip()
+        raw = _input_stripped(
+            f"{label} [{default}]: ",
+            label=label,
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if not raw:
             return default
         try:
             return int(raw)
         except ValueError:
             typer.echo("Enter an integer.")
+
+
+def _input_stripped(prompt: str, *, label: str, max_chars: int) -> str:
+    raw = input(prompt)
+    if len(raw) > max_chars:
+        raise typer.BadParameter(f"{label} must be no longer than {max_chars} chars")
+    return raw.strip()
 
 
 if __name__ == "__main__":

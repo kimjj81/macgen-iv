@@ -613,6 +613,7 @@ def test_steps_benchmark_run_single_fails_closed_when_restart_required(tmp_path,
 
 
 def test_steps_benchmark_run_single_checks_dependency_before_mlx_import(tmp_path, monkeypatch):
+    import builtins
     import importlib.util
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -627,6 +628,16 @@ def test_steps_benchmark_run_single_checks_dependency_before_mlx_import(tmp_path
     monkeypatch.setattr(module, "check_memory_guard", lambda label: {"free_gb": 100})
     monkeypatch.setattr(module, "check_run_allocation_budget", lambda **kwargs: {"shape_floor_gb": 1})
     monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: None if name == "mlx_video" else object())
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name in {"mlx", "mlx.core"}:
+            raise AssertionError("mlx.core must not be imported before dependency preflight")
+        return real_import(name, *args, **kwargs)
+
+    sys.modules.pop("mlx", None)
+    sys.modules.pop("mlx.core", None)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
 
     with pytest.raises(module.MemoryGuardError, match="dependency unavailable before MLX import"):
         module.run_single(1)
