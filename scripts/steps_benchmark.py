@@ -121,7 +121,7 @@ def _eval_mlx(mx, target, *, label: str) -> None:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        raise _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label}]: MLX eval failed; "
             "aborting because Metal runtime state may be unsafe."
         ) from exc
@@ -407,6 +407,15 @@ def _cleanup_after_exception(exc: BaseException) -> dict[str, object]:
     return cleanup
 
 
+def _runtime_memory_abort_after_cleanup(message: str) -> RuntimeMemoryAbort:
+    abort = RuntimeMemoryAbort(message)
+    try:
+        setattr(abort, _CLEANUP_DONE_ATTR, True)
+    except Exception:
+        pass
+    return abort
+
+
 def _check_decoded_video_shape(video, *, label: str) -> None:
     actual = _bounded_shape_tuple(video, expected_rank=4, label=label)
     expected = (FRAMES, HEIGHT, WIDTH, 3)
@@ -472,7 +481,7 @@ def _video_pixel_stat_int(video: Any, metric: str, *, label: str) -> int:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        raise _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
         ) from exc
@@ -486,7 +495,7 @@ def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        raise _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
         ) from exc
@@ -504,7 +513,7 @@ def _save_png_frame(image_module: Any, video: Any, index: int, *, step_dir: Path
         gc.collect()
         _clear_exception_traceback_frames(exc)
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        raise _runtime_memory_abort_after_cleanup(
             f"Runtime memory abort [{label} png frame {index}]: PNG frame save failed; "
             "aborting because host materialization state may be unsafe."
         ) from exc
