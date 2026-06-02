@@ -2509,6 +2509,63 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert caught.value.__context__ is None
         assert caught.value.__traceback__ is not None
 
+    def test_base_synchronize_fails_closed_when_cleanup_fails(self, monkeypatch):
+        import gc
+        import weakref
+        import fastgen_profiler.mlx_guard as mlx_guard
+        from fastgen_profiler.backends.base import synchronize_mlx
+
+        class HeavyLocal:
+            pass
+
+        class UnsafeCleanupError(RuntimeError):
+            def __str__(self):
+                raise AssertionError("sync cleanup failure must not stringify the original exception")
+
+            def __repr__(self):
+                raise AssertionError("sync cleanup failure must not repr the original exception")
+
+        sync_ref: weakref.ReferenceType[object] | None = None
+        cleanup_ref: weakref.ReferenceType[object] | None = None
+        cleanup_errors: list[UnsafeCleanupError] = []
+
+        class FakeMx:
+            def eval(self, target):
+                nonlocal sync_ref
+                heavy = HeavyLocal()
+                sync_ref = weakref.ref(heavy)
+                raise RuntimeError("metal sync failed")
+
+        def cleanup():
+            nonlocal cleanup_ref
+            gc.collect()
+            assert sync_ref is not None
+            assert sync_ref() is None
+            heavy = HeavyLocal()
+            cleanup_ref = weakref.ref(heavy)
+            exc = UnsafeCleanupError("cleanup failed")
+            cleanup_errors.append(exc)
+            raise exc
+
+        monkeypatch.setitem(sys.modules, "mlx.core", FakeMx())
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX synchronization failed") as caught:
+            synchronize_mlx(object())
+
+        assert "MLX cleanup also failed: cleanup failed" in str(caught.value)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert cleanup_errors
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
+        gc.collect()
+        assert sync_ref is not None
+        assert sync_ref() is None
+        assert cleanup_ref is not None
+        assert cleanup_ref() is None
+
     def test_adapter_synchronize_aborts_and_cleans_up_when_loaded_mlx_eval_fails(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
@@ -4247,16 +4304,25 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pipe.encode_text({"prompt": "prompt", "negative_prompt": ""})
 
     def test_ltx23_text_encoder_dependency_check_runs_before_mlx_runtime_guard(self, tmp_path, monkeypatch):
+        import fastgen_profiler.backends.ltx23_mlx_adapter as ltx23_mlx_adapter
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
         text_encoder_dir = tmp_path / "text_encoder"
         tokenizer_dir = tmp_path / "tokenizer"
         _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
-        _install_fake_transformers_tokenizer(monkeypatch)
         monkeypatch.setattr(
-            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
-            lambda name: None if name == "mlx_lm" else object(),
+            ltx23_mlx_adapter,
+            "_dependency_available",
+            lambda name: False if name == "mlx_lm" else True,
         )
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "transformers" or name.startswith("transformers."):
+                raise AssertionError("tokenizer must not load before mlx_lm dependency preflight")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
 
         pipe = LTX23MLXPipeline(
             model_path=tmp_path / "model",
@@ -4272,7 +4338,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             AssertionError("runtime guard must not run before mlx_lm dependency preflight")
         )
 
-        with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+        with pytest.raises(ModuleNotFoundError, match="before loading tokenizer or initializing MLX"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 16)
 
     def test_ltx23_encode_text_checks_runtime_before_text_projection_safetensors_load(self, tmp_path, monkeypatch):
@@ -5156,6 +5222,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
     def test_ltx23_text_encoder_rejects_token_sequence_before_mlx_array(self, tmp_path, monkeypatch):
         import numpy as np
         import fastgen_profiler.mlx_guard as mlx_guard
+        import fastgen_profiler.backends.ltx23_mlx_adapter as ltx23_mlx_adapter
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
         text_encoder_dir = tmp_path / "text_encoder"
@@ -5218,6 +5285,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         monkeypatch.setitem(sys.modules, "mlx_video.models.ltx_2.utils", utils_module)
         monkeypatch.setattr(builtins, "__import__", guarded_import)
         monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", None)
+        monkeypatch.setattr(ltx23_mlx_adapter, "_dependency_available", lambda name: True)
 
         pipe = LTX23MLXPipeline(
             model_path=tmp_path,

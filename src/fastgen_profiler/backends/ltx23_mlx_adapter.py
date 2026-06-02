@@ -509,6 +509,11 @@ class LTX23MLXPipeline:
         full_config = _read_bounded_json_config(config_path, "text_encoder config")
         text_config = full_config["text_config"]
         self._preflight_text_model_config(text_config, "text_encoder model config")
+        if not _dependency_available("mlx_lm"):
+            raise ModuleNotFoundError(
+                "mlx_lm is required for the LTX2.3 text encoder; dependency check "
+                "failed before loading tokenizer or initializing MLX"
+            )
         from transformers import AutoTokenizer
         from fastgen_profiler.mlx_guard import check_token_sequence_budget
 
@@ -772,6 +777,11 @@ class LTX23MLXPipeline:
         full_config = _read_bounded_json_config(config_path, "text_encoder config")
         text_config = full_config["text_config"]
         self._preflight_text_model_config(text_config, "text_encoder model config")
+        if not _dependency_available("mlx_lm"):
+            raise ModuleNotFoundError(
+                "mlx_lm is required for the LTX2.3 text encoder; dependency check "
+                "failed before loading tokenizer or initializing MLX"
+            )
         from transformers import AutoTokenizer
         from fastgen_profiler.mlx_guard import check_token_sequence_budget
 
@@ -790,12 +800,6 @@ class LTX23MLXPipeline:
             hidden_size=hidden_size,
             label="ltx2.3 text_encoder",
         )
-        if not _dependency_available("mlx_lm"):
-            raise ModuleNotFoundError(
-                "mlx_lm is required for the LTX2.3 text encoder; dependency check "
-                "failed before initializing MLX"
-            )
-
         self._ensure_mlx_runtime_ready("text_encoder")
 
         abort = None

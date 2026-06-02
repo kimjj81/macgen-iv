@@ -78,23 +78,33 @@ def synchronize_mlx(target: object | None = None) -> None:
     if mx is None:
         return
 
+    abort_message = None
     try:
         mx.eval(target)
         return
     except Exception as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
+        from fastgen_profiler.mlx_guard import mlx_cleanup
 
         target = None
         _clear_traceback_frames(exc)
-        mlx_cleanup()
+        cleanup_error = None
+        try:
+            mlx_cleanup()
+        except Exception as cleanup_exc:
+            cleanup_error = _safe_exception_text(cleanup_exc)
+            _clear_traceback_frames(cleanup_exc)
+            _detach_exception(cleanup_exc)
         _detach_exception(exc)
+        abort_message = (
+            "Runtime memory abort [synchronize]: MLX synchronization failed; "
+            "aborting because Metal runtime state may be unsafe."
+        )
+        if cleanup_error is not None:
+            abort_message += f" MLX cleanup also failed: {cleanup_error}."
 
     from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
-    raise RuntimeMemoryAbort(
-        "Runtime memory abort [synchronize]: MLX synchronization failed; "
-        "aborting because Metal runtime state may be unsafe."
-    )
+    raise RuntimeMemoryAbort(abort_message)
 
 
 def mlx_memory_snapshot() -> dict[str, int | None]:
@@ -117,6 +127,28 @@ def _memory_counter_or_none(value: object) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     return value
+
+
+def _safe_exception_text(exc: BaseException) -> str:
+    parts = [_safe_summary_text(arg) for arg in exc.args[:4]]
+    if not parts:
+        exc_type = type(exc)
+        return f"<{exc_type.__module__}.{exc_type.__qualname__}>"
+    if len(exc.args) > 4:
+        parts.append("...<truncated>")
+    if len(parts) == 1:
+        return parts[0]
+    exc_type = type(exc)
+    return f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}"
+
+
+def _safe_summary_text(value: object) -> str:
+    if isinstance(value, str):
+        return value[:1024]
+    if value is None or isinstance(value, (bool, int, float)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
 def _clear_traceback_frames(exc: BaseException) -> None:
