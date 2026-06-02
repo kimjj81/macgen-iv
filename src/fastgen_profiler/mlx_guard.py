@@ -764,14 +764,17 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
     Raises RuntimeMemoryAbort if the system is about to OOM.
     """
     _check_mlx_runtime_limit(label)
+    abort = None
     try:
         snap = system_snapshot()
     except Exception as exc:
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        abort = RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
             "during MLX/Metal run. Aborting because runtime memory state is unknown."
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
 
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:
@@ -822,15 +825,18 @@ def _check_mlx_runtime_limit(label: str) -> None:
     mx = sys.modules.get("mlx.core")
     if mx is None:
         return
+    abort = None
     try:
         active = _mlx_counter_bytes(mx.get_active_memory(), "active")
         cache = _mlx_counter_bytes(mx.get_cache_memory(), "cache")
     except Exception as exc:
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        abort = RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot read MLX allocator memory "
             "while a configured memory limit is active."
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
     used = active + cache
     threshold = int(_current_mlx_memory_limit_bytes * RUNTIME_MLX_LIMIT_ABORT_FRACTION)
     if used >= threshold:
@@ -863,14 +869,17 @@ def check_host_allocation_headroom(
             f"[{label}]: required_bytes must be a positive integer, got {_safe_diagnostic_value(required_bytes)}"
         )
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
+    abort = None
     try:
         snap = system_snapshot()
     except Exception as exc:
         _cleanup_after_exception(exc)
-        raise RuntimeMemoryAbort(
+        abort = RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
             f"before allocating {required_bytes / 1e9:.1f}GB on host."
-        ) from exc
+        )
+    if abort is not None:
+        raise abort
     required_with_reserve = required_bytes + reserve_bytes
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:

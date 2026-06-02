@@ -756,10 +756,8 @@ class TestCheckRuntimeMemory:
             check_runtime_memory(label="snapshot-failure")
 
         assert cleanup_calls == ["cleanup"]
-        assert caught.value.__cause__ is not None
-        assert caught.value.__cause__.__traceback__ is None
-        assert caught.value.__cause__.__cause__ is None
-        assert caught.value.__cause__.__context__ is None
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
     def test_runtime_mlx_counter_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
         import gc
@@ -805,10 +803,8 @@ class TestCheckRuntimeMemory:
             check_runtime_memory(label="counter-failure")
 
         assert cleanup_calls == ["cleanup"]
-        assert caught.value.__cause__ is not None
-        assert caught.value.__cause__.__traceback__ is None
-        assert caught.value.__cause__.__cause__ is None
-        assert caught.value.__cause__.__context__ is None
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
     @pytest.mark.parametrize("counter_value", [-1, "100", 1.5, True])
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
@@ -1676,10 +1672,12 @@ class TestAllocationBudget:
         monkeypatch.setattr(mlx_guard, "system_snapshot", snapshot_failure)
         monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
 
-        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry"):
+        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry") as caught:
             check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
 
         assert cleanup_calls == ["cleanup"]
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
