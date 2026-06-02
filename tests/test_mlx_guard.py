@@ -135,19 +135,34 @@ class TestVmStatParsing:
     def test_free_memory_parses_commas_and_page_size(self, mock_run):
         import subprocess
 
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=["vm_stat"],
-            returncode=0,
-            stdout=(
+        def fake_run(args, **kwargs):
+            kwargs["stdout"].write(
                 "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
                 "Pages free:                               1,000.\n"
                 "Pages active:                             3,000.\n"
                 "Pages inactive:                           2,000.\n"
-            ),
-            stderr="",
-        )
+                .encode("utf-8")
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0)
+
+        mock_run.side_effect = fake_run
 
         assert free_memory_bytes() == 3000 * 4096
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["stderr"] is subprocess.DEVNULL
+        assert "capture_output" not in kwargs
+
+    @patch("fastgen_profiler.mlx_guard.subprocess.run")
+    def test_free_memory_treats_oversized_telemetry_as_unknown(self, mock_run):
+        import subprocess
+
+        def fake_run(args, **kwargs):
+            kwargs["stdout"].write(b"x" * 65_537)
+            return subprocess.CompletedProcess(args=args, returncode=0)
+
+        mock_run.side_effect = fake_run
+
+        assert free_memory_bytes() is None
 
 
 class TestSystemTelemetryFailures:

@@ -12,6 +12,7 @@ from fastgen_profiler.metrics import (
     MAX_METRIC_TEXT_FIELD_CHARS,
     REQUIRED_PHASES,
     RunConfig,
+    append_jsonl,
     machine_metadata,
     make_record,
     read_jsonl,
@@ -134,6 +135,48 @@ def test_read_jsonl_rejects_more_records_than_limit(tmp_path):
         assert "exceeds JSONL record limit" in str(exc)
     else:
         raise AssertionError("read_jsonl should reject excessive record counts")
+
+
+def test_append_jsonl_rejects_more_records_than_limit(tmp_path):
+    config = RunConfig(
+        model="ltx2.3",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="write limit",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path,
+        result_jsonl=tmp_path / "records.jsonl",
+        save_video=False,
+        dry_run=True,
+    )
+
+    def records():
+        while True:
+            yield make_record(
+                config,
+                run_id="run",
+                timestamp_utc="2026-01-01T00:00:00Z",
+                machine={},
+                phase="total",
+                seconds=0.0,
+            )
+
+    with pytest.raises(ValueError, match="exceeds JSONL write record limit"):
+        append_jsonl(config.result_jsonl, records(), max_records=1)
+
+    assert len(config.result_jsonl.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_measurement_record_bounds_serialized_text_fields():

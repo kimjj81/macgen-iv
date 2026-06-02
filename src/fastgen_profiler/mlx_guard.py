@@ -17,6 +17,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,7 @@ DEFAULT_MLX_CACHE_LIMIT_BYTES = 1 * 1024 ** 3  # 1 GB
 MIN_MLX_MEMORY_LIMIT_BYTES = 512 * 1024 ** 2  # 512 MiB
 DEFAULT_MAX_PROMPT_CHARS = 8192
 MAX_PROMPT_CHARS = 65_536
+MAX_TELEMETRY_OUTPUT_BYTES = 64 * 1024
 
 # Adaptive batch sizing defaults.
 ADAPTIVE_INITIAL_FRAMES = 5
@@ -80,17 +82,14 @@ _current_mlx_memory_limit_bytes: int | None = None
 def _vm_stat() -> dict[str, int]:
     """Parse macOS vm_stat output into a dict of page counts."""
     try:
-        result = subprocess.run(
-            ["vm_stat"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        returncode, stdout = _run_bounded_stdout(["vm_stat"], timeout=10)
     except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if returncode != 0:
         return {}
 
     pages: dict[str, int] = {}
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         if "page size of" in line.lower():
             parts = line.replace(".", "").split()
             for index, part in enumerate(parts):
@@ -128,15 +127,11 @@ def total_memory_bytes() -> int | None:
     if sys.platform != "darwin":
         return None
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return int(result.stdout.strip())
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+        returncode, stdout = _run_bounded_stdout(["sysctl", "-n", "hw.memsize"], timeout=5)
+        if returncode != 0:
+            return None
+        return int(stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
 
 
@@ -156,14 +151,11 @@ def swap_file_count() -> int | None:
 def memory_pressure_fraction() -> float | None:
     """Return memory pressure as 0.0-1.0 on macOS, or None if unknown."""
     try:
-        result = subprocess.run(
-            ["memory_pressure"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        returncode, stdout = _run_bounded_stdout(["memory_pressure"], timeout=10)
+        if returncode != 0:
+            return None
         # Output: "System-wide memory free percentage: 72%"
-        for line in result.stdout.splitlines():
+        for line in stdout.splitlines():
             if "percentage" in line.lower():
                 pct_str = line.rsplit(":", 1)[-1].strip().rstrip("%")
                 try:
@@ -174,6 +166,33 @@ def memory_pressure_fraction() -> float | None:
     except (OSError, subprocess.TimeoutExpired):
         pass
     return None
+
+
+def _run_bounded_stdout(
+    args: list[str],
+    *,
+    timeout: float,
+    max_bytes: int = MAX_TELEMETRY_OUTPUT_BYTES,
+) -> tuple[int, str]:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+
+    with tempfile.TemporaryFile() as stdout:
+        result = subprocess.run(
+            args,
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        stdout.seek(0, os.SEEK_END)
+        size = stdout.tell()
+        if size > max_bytes:
+            raise OSError(
+                f"{args[0]} output exceeded telemetry limit: {size} bytes > {max_bytes} bytes"
+            )
+        stdout.seek(0)
+        data = stdout.read(max_bytes)
+    return result.returncode, data.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------

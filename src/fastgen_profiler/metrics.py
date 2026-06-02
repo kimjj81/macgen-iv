@@ -185,10 +185,21 @@ def make_record(
     )
 
 
-def append_jsonl(path: Path, records: Iterable[MeasurementRecord]) -> None:
+def append_jsonl(
+    path: Path,
+    records: Iterable[MeasurementRecord],
+    *,
+    max_records: int = DEFAULT_JSONL_READ_MAX_RECORDS,
+) -> None:
+    if max_records <= 0:
+        raise ValueError("JSONL write record limit must be positive")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        for record in records:
+        for index, record in enumerate(records):
+            if index >= max_records:
+                raise ValueError(
+                    f"{path} exceeds JSONL write record limit: more than {max_records} records"
+                )
             handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
 
 
