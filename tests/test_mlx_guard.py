@@ -890,6 +890,39 @@ class TestConfigureMlxResourceLimits:
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_limit_set_failure_does_not_stringify_unsafe_exception(self, monkeypatch):
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
+
+        class UnsafeLimitError(RuntimeError):
+            def __repr__(self):
+                raise AssertionError("memory limit failure must not call repr")
+
+            def __str__(self):
+                raise AssertionError("memory limit failure must not call str")
+
+        monkeypatch.setattr(
+            mx,
+            "set_memory_limit",
+            lambda value: (_ for _ in ()).throw(UnsafeLimitError()),
+        )
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        with pytest.raises(MemoryGuardError, match="UnsafeLimitError"):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=None,
+                ),
+                label="limit-fail",
+            )
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_wired_limit_set_failure_fails_closed_after_mlx_import(self, monkeypatch):
         mx = _install_fake_mlx(monkeypatch)
         monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
@@ -901,6 +934,42 @@ class TestConfigureMlxResourceLimits:
         monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
 
         with pytest.raises(MemoryGuardError, match="failed to set MLX wired memory limit"):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=None,
+                ),
+                label="wired-fail",
+            )
+
+        assert cleanup_calls == ["cleanup"]
+
+    def test_wired_limit_set_failure_does_not_stringify_unsafe_exception(self, monkeypatch):
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
+        monkeypatch.setenv("FASTGEN_MLX_WIRED_LIMIT_GB", "10")
+        monkeypatch.setattr(mx, "set_memory_limit", lambda value: 0)
+        monkeypatch.setattr(mx, "set_cache_limit", lambda value: 0)
+
+        class UnsafeWiredError(RuntimeError):
+            def __repr__(self):
+                raise AssertionError("wired limit failure must not call repr")
+
+            def __str__(self):
+                raise AssertionError("wired limit failure must not call str")
+
+        monkeypatch.setattr(
+            mx,
+            "set_wired_limit",
+            lambda value: (_ for _ in ()).throw(UnsafeWiredError()),
+        )
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        with pytest.raises(MemoryGuardError, match="UnsafeWiredError"):
             configure_mlx_resource_limits(
                 snapshot=SystemSnapshot(
                     free_bytes=80 * 1024 ** 3,
@@ -1251,6 +1320,29 @@ class TestConfigureMlxResourceLimits:
                 label="probe",
             )
 
+    @patch("fastgen_profiler.mlx_guard.subprocess.run")
+    def test_probe_failure_does_not_stringify_unsafe_os_error(self, mock_run):
+        class UnsafeProbeError(OSError):
+            def __repr__(self):
+                raise AssertionError("MLX probe failure must not call repr")
+
+            def __str__(self):
+                raise AssertionError("MLX probe failure must not call str")
+
+        mock_run.side_effect = UnsafeProbeError()
+
+        with pytest.raises(MemoryGuardError, match="UnsafeProbeError"):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=80 / 128,
+                ),
+                label="probe",
+            )
+
     def test_low_free_memory_blocks_before_mlx_probe_or_import(self, monkeypatch):
         import fastgen_profiler.mlx_guard as mlx_guard
 
@@ -1272,6 +1364,17 @@ class TestConfigureMlxResourceLimits:
 
 
 class TestAllocationBudget:
+    def test_host_allocation_invalid_required_bytes_does_not_stringify_unknown_value(self):
+        class UnsafeBytes:
+            def __repr__(self):
+                raise AssertionError("host allocation guard must not call repr")
+
+            def __str__(self):
+                raise AssertionError("host allocation guard must not call str")
+
+        with pytest.raises(MemoryGuardError, match="UnsafeBytes"):
+            check_host_allocation_headroom(UnsafeBytes(), label="numpy")  # type: ignore[arg-type]
+
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_host_allocation_abort_when_reserve_would_be_consumed(self, mock_snap):
         mock_snap.return_value = SystemSnapshot(

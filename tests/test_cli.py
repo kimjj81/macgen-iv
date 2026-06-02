@@ -630,6 +630,107 @@ def test_mlx_profile_guard_error_preserves_model_candidate(tmp_path, monkeypatch
     assert records[0]["model_path"] == str(model_path.resolve())
 
 
+def test_run_command_summarizes_unsafe_memory_guard_exception(tmp_path, monkeypatch):
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    jsonl_path = tmp_path / "run.jsonl"
+
+    class UnsafeGuardError(MemoryGuardError):
+        def __str__(self):
+            raise AssertionError("run command must not call str on memory guard exceptions")
+
+        def __repr__(self):
+            raise AssertionError("run command must not call repr on memory guard exceptions")
+
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(UnsafeGuardError()),
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "stub",
+            "--prompt",
+            "unsafe guard",
+            "--seed",
+            "12",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--no-save-video",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert "UnsafeGuardError" in records[0]["error"]
+
+
+def test_profile_command_summarizes_unsafe_memory_guard_exception(tmp_path, monkeypatch):
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    jsonl_path = tmp_path / "profile.jsonl"
+
+    class UnsafeGuardError(MemoryGuardError):
+        def __str__(self):
+            raise AssertionError("profile command must not call str on memory guard exceptions")
+
+        def __repr__(self):
+            raise AssertionError("profile command must not call repr on memory guard exceptions")
+
+    monkeypatch.setattr(
+        cli_module.Profiler,
+        "run",
+        lambda self, config: (_ for _ in ()).throw(UnsafeGuardError()),
+    )
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "stub",
+            "--prompt",
+            "unsafe guard",
+            "--seed",
+            "12",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert "UnsafeGuardError" in records[0]["error"]
+
+
 def test_mlx_scaffold_runs_cli_memory_guard_before_failed_schema_records(tmp_path, monkeypatch):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
@@ -1542,6 +1643,59 @@ def test_mlx_pre_run_guard_blocks_after_one_completed_run(monkeypatch):
 
     assert error is not None
     assert "process restart required after 1 consecutive MLX runs" in error
+
+
+def test_mlx_pre_run_guard_summarizes_unsafe_guard_exceptions(tmp_path, monkeypatch):
+    import fastgen_profiler.mlx_guard as mlx_guard
+
+    class UnsafeGuardError(Exception):
+        def __str__(self):
+            raise AssertionError("pre-run guard must not call str on guard exceptions")
+
+        def __repr__(self):
+            raise AssertionError("pre-run guard must not call repr on guard exceptions")
+
+    monkeypatch.setattr(mlx_guard, "should_restart_process", lambda: False)
+    monkeypatch.setattr(mlx_guard, "run_counter", lambda: 0)
+    monkeypatch.setattr(
+        mlx_guard,
+        "check_run_allocation_budget",
+        lambda **kwargs: (_ for _ in ()).throw(UnsafeGuardError()),
+    )
+    monkeypatch.setattr(
+        mlx_guard,
+        "inter_run_system_recovery",
+        lambda label: (_ for _ in ()).throw(AssertionError("recovery must not run after guard failure")),
+    )
+
+    config = RunConfig(
+        model="ltx2.3",
+        backend="mlx",
+        model_path=str(tmp_path),
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=512,
+        height=512,
+        frames=9,
+        fps=24,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path / "outputs",
+        result_jsonl=tmp_path / "results.jsonl",
+        save_video=False,
+        dry_run=False,
+    )
+
+    error = cli_module._mlx_pre_run_guard("unsafe", config=config)
+
+    assert error is not None
+    assert "UnsafeGuardError" in error
 
 
 def test_mlx_pre_run_guard_fails_closed_when_guard_unavailable(monkeypatch):

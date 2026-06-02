@@ -183,7 +183,7 @@ def _run_bounded_stdout(
     max_bytes: int = MAX_TELEMETRY_OUTPUT_BYTES,
 ) -> tuple[int, str]:
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
-        raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+        raise ValueError(f"max_bytes must be a positive integer, got {_safe_diagnostic_value(max_bytes)}")
 
     with tempfile.TemporaryFile() as stdout:
         result = subprocess.run(
@@ -394,7 +394,7 @@ def _env_gb_to_bytes(name: str) -> int | None:
     try:
         gb = float(value)
     except ValueError as exc:
-        raise MemoryGuardError(f"{name} must be a number of GB, got {value!r}") from exc
+        raise MemoryGuardError(f"{name} must be a number of GB, got {_safe_diagnostic_value(value)}") from exc
     if not math.isfinite(gb) or gb <= 0:
         raise MemoryGuardError(f"{name} must be a finite number of GB greater than zero")
     bytes_value = int(gb * 1024 ** 3)
@@ -557,17 +557,18 @@ def configure_mlx_resource_limits(
                 previous = mx.set_wired_limit(wired_limit)
                 status["previous_wired_limit_gb"] = round(previous / 1e9, 2)
             except Exception as exc:
-                status["wired_limit_error"] = str(exc)
+                status["wired_limit_error"] = _safe_diagnostic_value(exc)
                 mlx_cleanup()
                 raise MemoryGuardError(
-                    f"Memory guard [{label}]: failed to set MLX wired memory limit: {exc}"
+                    "Memory guard "
+                    f"[{label}]: failed to set MLX wired memory limit: {_safe_diagnostic_value(exc)}"
                 ) from exc
     except MemoryGuardError:
         raise
     except Exception as exc:
         mlx_cleanup()
         raise MemoryGuardError(
-            f"Memory guard [{label}]: failed to set MLX memory limits: {exc}"
+            f"Memory guard [{label}]: failed to set MLX memory limits: {_safe_diagnostic_value(exc)}"
         ) from exc
 
     global _current_mlx_memory_limit_bytes
@@ -596,7 +597,7 @@ def _probe_mlx_import(label: str) -> None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MemoryGuardError(
-            f"Memory guard [{label}]: cannot verify MLX/Metal availability: {exc}"
+            f"Memory guard [{label}]: cannot verify MLX/Metal availability: {_safe_diagnostic_value(exc)}"
         ) from exc
     if result.returncode != 0:
         raise MemoryGuardError(
@@ -781,7 +782,9 @@ def _check_mlx_runtime_limit(label: str) -> None:
 
 def _mlx_counter_bytes(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"MLX {name} memory counter must be a non-negative integer, got {value!r}")
+        raise ValueError(
+            f"MLX {name} memory counter must be a non-negative integer, got {_safe_diagnostic_value(value)}"
+        )
     return value
 
 
@@ -794,7 +797,8 @@ def check_host_allocation_headroom(
     """Abort before large CPU-side allocations when system headroom is tight."""
     if not isinstance(required_bytes, int) or isinstance(required_bytes, bool) or required_bytes <= 0:
         raise MemoryGuardError(
-            f"Memory guard [{label}]: required_bytes must be a positive integer, got {required_bytes!r}"
+            "Memory guard "
+            f"[{label}]: required_bytes must be a positive integer, got {_safe_diagnostic_value(required_bytes)}"
         )
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
     snap = system_snapshot()
@@ -859,17 +863,20 @@ def estimate_video_run_floor_bytes(
     for name, value in (("width", width), ("height", height), ("frames", frames)):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise MemoryGuardError(
-                f"Memory guard [shape budget]: {name} must be a positive integer, got {value!r}"
+                "Memory guard "
+                f"[shape budget]: {name} must be a positive integer, got {_safe_diagnostic_value(value)}"
             )
     try:
         guidance_value = float(guidance)
     except (TypeError, ValueError) as exc:
         raise MemoryGuardError(
-            f"Memory guard [shape budget]: guidance must be a finite number, got {guidance!r}"
+            "Memory guard "
+            f"[shape budget]: guidance must be a finite number, got {_safe_diagnostic_value(guidance)}"
         ) from exc
     if not math.isfinite(guidance_value):
         raise MemoryGuardError(
-            f"Memory guard [shape budget]: guidance must be a finite number, got {guidance!r}"
+            "Memory guard "
+            f"[shape budget]: guidance must be a finite number, got {_safe_diagnostic_value(guidance)}"
         )
 
     latent_h = max(1, (height + 7) // 8)
@@ -913,9 +920,13 @@ def _max_prompt_chars() -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}") from exc
+        raise MemoryGuardError(
+            f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {_safe_diagnostic_value(raw)}"
+        ) from exc
     if value <= 0:
-        raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}")
+        raise MemoryGuardError(
+            f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {_safe_diagnostic_value(raw)}"
+        )
     if value > MAX_PROMPT_CHARS:
         raise MemoryGuardError(
             f"FASTGEN_MAX_PROMPT_CHARS must be no greater than {MAX_PROMPT_CHARS}, got {value}"
@@ -972,7 +983,8 @@ def check_token_sequence_budget(
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise MemoryGuardError(
-                f"Memory guard [{label}]: {name} must be a positive integer, got {value!r}"
+                "Memory guard "
+                f"[{label}]: {name} must be a positive integer, got {_safe_diagnostic_value(value)}"
             )
     if token_count > max_tokens:
         raise MemoryGuardError(
@@ -1025,17 +1037,19 @@ class AdaptiveBatchConfig:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise MemoryGuardError(
-                    f"Memory guard [adaptive batch]: {name} must be a positive integer, got {value!r}"
+                    "Memory guard "
+                    f"[adaptive batch]: {name} must be a positive integer, got {_safe_diagnostic_value(value)}"
                 )
         for name in ("headroom_grow_threshold", "headroom_shrink_threshold"):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
                 raise MemoryGuardError(
-                    f"Memory guard [adaptive batch]: {name} must be a finite number in [0, 1], got {value!r}"
+                    "Memory guard "
+                    f"[adaptive batch]: {name} must be a finite number in [0, 1], got {_safe_diagnostic_value(value)}"
                 )
             if value < 0 or value > 1:
                 raise MemoryGuardError(
-                    f"Memory guard [adaptive batch]: {name} must be in [0, 1], got {value!r}"
+                    f"Memory guard [adaptive batch]: {name} must be in [0, 1], got {_safe_diagnostic_value(value)}"
                 )
         if (
             not isinstance(self.max_growth_factor, (int, float))
@@ -1045,7 +1059,7 @@ class AdaptiveBatchConfig:
         ):
             raise MemoryGuardError(
                 "Memory guard [adaptive batch]: max_growth_factor must be a finite number greater than 1, "
-                f"got {self.max_growth_factor!r}"
+                f"got {_safe_diagnostic_value(self.max_growth_factor)}"
             )
         if self.min_frames > self.target_frames:
             raise MemoryGuardError(
@@ -1262,7 +1276,8 @@ def adaptive_batch_config_from_run(
     for name, value in (("target_frames", target_frames), ("target_steps", target_steps)):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise MemoryGuardError(
-                f"Memory guard [adaptive batch]: {name} must be a positive integer, got {value!r}"
+                "Memory guard "
+                f"[adaptive batch]: {name} must be a positive integer, got {_safe_diagnostic_value(value)}"
             )
     return AdaptiveBatchConfig(
         initial_frames=min(ADAPTIVE_INITIAL_FRAMES, target_frames),

@@ -354,10 +354,10 @@ def run_command(options: RunOptions) -> int:
             records = Profiler(backend).run(config)
         except _memory_guard_error_type() as exc:
             guard_failed = True
-            guard_error = f"Memory guard blocked run: {exc}"
+            guard_error = f"Memory guard blocked run: {_safe_exception_text(exc)}"
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
-            runtime_abort_error = f"Runtime memory abort: {exc}"
+            runtime_abort_error = f"Runtime memory abort: {_safe_exception_text(exc)}"
         finally:
             if mlx_runtime_required:
                 cleanup_status = _mlx_post_run_cleanup(config.variant_label or "manual")
@@ -551,9 +551,12 @@ def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | 
             f"run={recovery.get('run_number', '?')}/{MAX_CONSECUTIVE_RUNS}"
         )
     except ImportError as exc:
-        return f"Memory guard blocked run: mlx_guard unavailable before MLX run: {exc}"
+        return (
+            "Memory guard blocked run: mlx_guard unavailable before MLX run: "
+            f"{_safe_exception_text(exc)}"
+        )
     except Exception as exc:
-        return f"Memory guard blocked run: {exc}"
+        return f"Memory guard blocked run: {_safe_exception_text(exc)}"
     return None
 
 
@@ -575,7 +578,8 @@ def _mlx_post_run_cleanup(label: str) -> dict[str, object] | None:
         return {"snapshot": snap, "cleanup": cleanup, "run_number": completed_runs}
     except ImportError as exc:
         typer.echo(
-            f"[guard] post-run '{label}': cleanup unavailable because mlx_guard could not be imported: {exc}"
+            f"[guard] post-run '{label}': cleanup unavailable because mlx_guard could not be imported: "
+            f"{_safe_exception_text(exc)}"
         )
         return {
             "snapshot": None,
@@ -797,13 +801,15 @@ def profile_command(options: RunOptions) -> int:
         except _memory_guard_error_type() as exc:
             guard_failed = True
             memory_guard_failed = True
-            logger.warning(f"Memory guard failure for '{spec_label}': {exc}")
-            guard_error = f"Memory guard blocked run: {exc}"
+            safe_error = _safe_exception_text(exc)
+            logger.warning(f"Memory guard failure for '{spec_label}': {safe_error}")
+            guard_error = f"Memory guard blocked run: {safe_error}"
         except _runtime_memory_abort_type() as exc:
             memory_aborted = True
             memory_guard_failed = True
-            logger.warning(f"Runtime memory abort for '{spec_label}': {exc}")
-            runtime_abort_error = f"Runtime memory abort: {exc}"
+            safe_error = _safe_exception_text(exc)
+            logger.warning(f"Runtime memory abort for '{spec_label}': {safe_error}")
+            runtime_abort_error = f"Runtime memory abort: {safe_error}"
         finally:
             if mlx_runtime_required:
                 cleanup_status = _mlx_post_run_cleanup(spec_label)
