@@ -209,16 +209,25 @@ class LTX23MLXPipeline:
         *,
         failure: str = "MLX/Metal runtime failed",
     ) -> None:
+        raise self._runtime_abort_after_failure(phase, exc, failure=failure)
+
+    def _runtime_abort_after_failure(
+        self,
+        phase: str,
+        exc: BaseException,
+        *,
+        failure: str = "MLX/Metal runtime failed",
+    ) -> BaseException:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         self._poison_after_runtime_failure()
         gc.collect()
         _cleanup_loaded_runtime_after_error(exc)
         detail = _safe_exception_detail(exc)
-        raise RuntimeMemoryAbort(
+        return RuntimeMemoryAbort(
             f"Runtime memory abort [ltx2.3 {phase}]: {failure}: {detail}; "
             "pipeline was discarded to avoid retaining unsafe runtime state."
-        ) from None
+        )
 
     def _check_memory(self, phase: str) -> None:
         try:
@@ -525,28 +534,30 @@ class LTX23MLXPipeline:
         mx = sys.modules.get("mlx.core")
         if mx is None:
             return
+        abort = None
         try:
             mx.eval(target)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
             target = None
             gc.collect()
-            self._abort_after_runtime_failure(
+            abort = self._runtime_abort_after_failure(
                 "synchronize",
                 exc,
                 failure="MLX synchronization failed",
             )
+        if abort is not None:
+            raise abort
 
     def _eval_mlx(self, mx: Any, *targets: Any, phase: str) -> None:
+        abort = None
         try:
             mx.eval(*targets)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
             targets = ()
             gc.collect()
-            self._abort_after_runtime_failure(phase, exc, failure="MLX eval failed")
+            abort = self._runtime_abort_after_failure(phase, exc, failure="MLX eval failed")
+        if abort is not None:
+            raise abort
 
     def load_model(self) -> dict[str, object]:
         self._fail_if_runtime_failed("load_model")
@@ -639,7 +650,9 @@ class LTX23MLXPipeline:
             return {"model_type": self.config.model_type if self.config else "ltx2.3",
                     "width": self.width, "height": self.height}
         except Exception as exc:
-            self._abort_after_runtime_failure("load_model", exc)
+            abort = self._runtime_abort_after_failure("load_model", exc)
+        if abort is not None:
+            raise abort
 
     def prepare_prompt(self, *, prompt: str, negative_prompt: str | None) -> dict[str, str]:
         self._fail_if_runtime_failed("prepare_prompt")
@@ -696,6 +709,7 @@ class LTX23MLXPipeline:
         self._text_encode_started = True
         self._ensure_mlx_runtime_ready("encode_text")
 
+        abort = None
         try:
             import mlx.core as mx
             from mlx_video.models.ltx_2.utils import load_safetensors
@@ -742,7 +756,9 @@ class LTX23MLXPipeline:
             mx.clear_cache()
             return self.context_emb
         except Exception as exc:
-            self._abort_after_runtime_failure("encode_text", exc)
+            abort = self._runtime_abort_after_failure("encode_text", exc)
+        if abort is not None:
+            raise abort
 
     def _encode_with_gemma3(
         self, prompt: str, text_encoder_dir: Path, tokenizer_dir: Path, in_features: int
@@ -782,6 +798,7 @@ class LTX23MLXPipeline:
 
         self._ensure_mlx_runtime_ready("text_encoder")
 
+        abort = None
         try:
             import mlx.core as mx
             from mlx_video.models.ltx_2.utils import load_safetensors
@@ -874,7 +891,9 @@ class LTX23MLXPipeline:
 
             return context_emb
         except Exception as exc:
-            self._abort_after_runtime_failure("text_encoder", exc)
+            abort = self._runtime_abort_after_failure("text_encoder", exc)
+        if abort is not None:
+            raise abort
 
     def init_latents(self, *, seed: int, width: int, height: int, frames: int) -> Any:
         self._fail_if_runtime_failed("latent_init")
@@ -883,6 +902,7 @@ class LTX23MLXPipeline:
         self._validate_latent_init_shape(width=width, height=height, frames=frames)
         self._ensure_mlx_runtime_ready("latent_init")
 
+        abort = None
         try:
             import mlx.core as mx
 
@@ -902,7 +922,9 @@ class LTX23MLXPipeline:
             self._check_memory("latent_init after")
             return latents
         except Exception as exc:
-            self._abort_after_runtime_failure("latent_init", exc)
+            abort = self._runtime_abort_after_failure("latent_init", exc)
+        if abort is not None:
+            raise abort
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
         """Single denoise step matching official denoise_distilled logic."""
@@ -924,6 +946,7 @@ class LTX23MLXPipeline:
         self._check_memory(f"{phase} before")
         self._ensure_mlx_runtime_ready("denoise")
 
+        abort = None
         try:
             import mlx.core as mx
             from mlx_video.models.ltx_2.transformer import Modality
@@ -1007,7 +1030,9 @@ class LTX23MLXPipeline:
             self._check_memory(f"{phase} after")
             return next_latents
         except Exception as exc:
-            self._abort_after_runtime_failure(phase, exc)
+            abort = self._runtime_abort_after_failure(phase, exc)
+        if abort is not None:
+            raise abort
 
     def decode(self, latents: Any) -> Any:
         self._fail_if_runtime_failed("decode")
@@ -1053,6 +1078,7 @@ class LTX23MLXPipeline:
         video = None
         transposed = None
         frames = None
+        abort = None
         try:
             import mlx.core as mx
             from mlx_video.models.ltx_2.video_vae.decoder import VideoDecoder
@@ -1118,7 +1144,9 @@ class LTX23MLXPipeline:
         except Exception as exc:
             upsampler = vae_temp = vae = video = transposed = frames = latents = None
             gc.collect()
-            self._abort_after_runtime_failure("decode", exc)
+            abort = self._runtime_abort_after_failure("decode", exc)
+        if abort is not None:
+            raise abort
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
         self._fail_if_runtime_failed("video_encode")
@@ -1138,6 +1166,7 @@ class LTX23MLXPipeline:
             )
         self._ensure_mlx_runtime_ready("video_encode")
         temp_path: Path | None = None
+        abort = None
         try:
             from mlx_video.models.ltx_2.postprocess import save_video
 
@@ -1155,7 +1184,9 @@ class LTX23MLXPipeline:
                     pass
             frames = None
             gc.collect()
-            self._abort_after_runtime_failure("video_encode", exc)
+            abort = self._runtime_abort_after_failure("video_encode", exc)
+        if abort is not None:
+            raise abort
 
     def write_output(self, video: Any | Path, output_dir: Path, *, run_id: str) -> Path:
         self._fail_if_runtime_failed("write_output")
@@ -1178,6 +1209,7 @@ class LTX23MLXPipeline:
                 "failed before initializing MLX"
             )
         self._ensure_mlx_runtime_ready("file_write")
+        abort = None
         try:
             from mlx_video.models.ltx_2.postprocess import save_video
 
@@ -1185,7 +1217,9 @@ class LTX23MLXPipeline:
             self._check_memory("file_write after")
             return output_path
         except Exception as exc:
-            self._abort_after_runtime_failure("write_output", exc)
+            abort = self._runtime_abort_after_failure("write_output", exc)
+        if abort is not None:
+            raise abort
 
     def _check_tensor_shape_allocation(self, tensor: Any, phase: str, *, multiplier: int = 4) -> None:
         dimensions = _bounded_shape_tuple(

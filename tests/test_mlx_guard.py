@@ -6821,10 +6821,55 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
 
-        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed"):
+        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed") as caught:
             pipe._eval_mlx(FakeMx(), object(), phase="target release")
 
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
         assert cleanup_calls == ["cleanup"]
+
+    def test_ltx23_phase_abort_does_not_chain_runtime_exception(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        raised: list[RuntimeError] = []
+
+        class FakeRandom:
+            def seed(self, seed):
+                pass
+
+            def normal(self, shape):
+                exc = RuntimeError("metal allocation failed")
+                raised.append(exc)
+                raise exc
+
+        fake_mx = types.SimpleNamespace(random=FakeRandom(), eval=lambda *args: None)
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: None)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe.model = object()
+        pipe._ensure_mlx_runtime_ready = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="metal allocation failed") as caught:
+            pipe.init_latents(seed=1, width=256, height=256, frames=4)
+
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert raised
+        assert raised[0].__traceback__ is None
+        assert raised[0].__cause__ is None
+        assert raised[0].__context__ is None
 
     def test_ltx23_decode_runtime_abort_from_upsampled_shape_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -7250,10 +7295,52 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
 
-        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed"):
+        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed") as caught:
             pipe._eval_mlx(FakeMx(), object(), phase="target release")
 
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
         assert cleanup_calls == ["cleanup"]
+
+    def test_wan22_phase_abort_does_not_chain_runtime_exception(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        raised: list[RuntimeError] = []
+
+        class FakeRandom:
+            def seed(self, seed):
+                pass
+
+            def normal(self, shape):
+                exc = RuntimeError("metal allocation failed")
+                raised.append(exc)
+                raise exc
+
+        fake_mx = types.SimpleNamespace(random=FakeRandom(), eval=lambda *args: None)
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: None)
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = fake_mx
+        pipe.latent_shape = (48, 1, 16, 16)
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match="metal allocation failed") as caught:
+            pipe.init_latents(seed=1, width=256, height=256, frames=4)
+
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert raised
+        assert raised[0].__traceback__ is None
+        assert raised[0].__cause__ is None
+        assert raised[0].__context__ is None
 
     def test_wan22_decode_rejects_unexpected_frame_shape_before_numpy(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline

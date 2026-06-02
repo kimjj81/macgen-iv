@@ -165,16 +165,25 @@ class Wan22MLXPipeline:
         *,
         failure: str = "MLX/Metal runtime failed",
     ) -> None:
+        raise self._runtime_abort_after_failure(phase, exc, failure=failure)
+
+    def _runtime_abort_after_failure(
+        self,
+        phase: str,
+        exc: BaseException,
+        *,
+        failure: str = "MLX/Metal runtime failed",
+    ) -> BaseException:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         self._poison_after_runtime_failure()
         gc.collect()
         _cleanup_loaded_runtime_after_error(exc)
         detail = _safe_exception_detail(exc)
-        raise RuntimeMemoryAbort(
+        return RuntimeMemoryAbort(
             f"Runtime memory abort [wan2.2 {phase}]: {failure}: {detail}; "
             "pipeline was discarded to avoid retaining unsafe runtime state."
-        ) from None
+        )
 
     def _check_run_budget(self, phase: str) -> None:
         from fastgen_profiler.mlx_guard import check_run_allocation_budget
@@ -373,28 +382,30 @@ class Wan22MLXPipeline:
         mx = sys.modules.get("mlx.core")
         if mx is None:
             return
+        abort = None
         try:
             mx.eval(target)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
             target = None
             gc.collect()
-            self._abort_after_runtime_failure(
+            abort = self._runtime_abort_after_failure(
                 "synchronize",
                 exc,
                 failure="MLX synchronization failed",
             )
+        if abort is not None:
+            raise abort
 
     def _eval_mlx(self, mx: Any, *targets: Any, phase: str) -> None:
+        abort = None
         try:
             mx.eval(*targets)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
             targets = ()
             gc.collect()
-            self._abort_after_runtime_failure(phase, exc, failure="MLX eval failed")
+            abort = self._runtime_abort_after_failure(phase, exc, failure="MLX eval failed")
+        if abort is not None:
+            raise abort
 
     def load_model(self) -> dict[str, object]:
         self._fail_if_runtime_failed("load_model")
@@ -447,6 +458,7 @@ class Wan22MLXPipeline:
         self._preflight_model_config(raw_config, "config model tensor")
         self._ensure_mlx_runtime_ready("load_model")
 
+        abort = None
         try:
             self.config, self.quantization = _load_config(self.model_path)
             self.width, self.height = _aligned_size(self.width, self.height, self.config)
@@ -501,7 +513,9 @@ class Wan22MLXPipeline:
             np.random.seed(self.seed)
             return {"model_type": self.config.model_type, "width": self.width, "height": self.height}
         except Exception as exc:
-            self._abort_after_runtime_failure("load_model", exc)
+            abort = self._runtime_abort_after_failure("load_model", exc)
+        if abort is not None:
+            raise abort
 
     def prepare_prompt(self, *, prompt: str, negative_prompt: str | None) -> dict[str, str]:
         self._fail_if_runtime_failed("prepare_prompt")
@@ -558,6 +572,7 @@ class Wan22MLXPipeline:
             multiplier=2,
         )
         self._text_encode_started = True
+        abort = None
         try:
             from mlx_video.models.wan_2.utils import encode_text
 
@@ -603,7 +618,9 @@ class Wan22MLXPipeline:
             self.mx.clear_cache()
             return self.context_cond if self.cfg_disabled else self.context_cfg
         except Exception as exc:
-            self._abort_after_runtime_failure("encode_text", exc)
+            abort = self._runtime_abort_after_failure("encode_text", exc)
+        if abort is not None:
+            raise abort
 
     def _check_prompt_token_budget(self, prompt: str, phase: str) -> None:
         if self.config is None or self.tokenizer is None:
@@ -633,6 +650,7 @@ class Wan22MLXPipeline:
         if self.mx is None or self.latent_shape is None:
             raise RuntimeError("init_latents called before load_model")
         self._validate_latent_init_shape(width=width, height=height, frames=frames)
+        abort = None
         try:
             self._check_memory("latent_init before")
             self.mx.random.seed(seed)
@@ -642,7 +660,9 @@ class Wan22MLXPipeline:
             self._check_memory("latent_init after")
             return latents
         except Exception as exc:
-            self._abort_after_runtime_failure("latent_init", exc)
+            abort = self._runtime_abort_after_failure("latent_init", exc)
+        if abort is not None:
+            raise abort
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
         self._fail_if_runtime_failed("denoise")
@@ -657,6 +677,7 @@ class Wan22MLXPipeline:
             raise RuntimeError("denoise_step called before encode_text")
         phase = f"denoise {step_index + 1}/{steps}"
 
+        abort = None
         try:
             self._validate_latents_shape(latents, phase)
             context = self.context_cond if self.cfg_disabled else self.context_cfg
@@ -701,7 +722,9 @@ class Wan22MLXPipeline:
             self._check_memory(f"{phase} after")
             return next_latents
         except Exception as exc:
-            self._abort_after_runtime_failure(phase, exc)
+            abort = self._runtime_abort_after_failure(phase, exc)
+        if abort is not None:
+            raise abort
 
     def decode(self, latents: Any) -> Any:
         self._fail_if_runtime_failed("decode")
@@ -723,6 +746,7 @@ class Wan22MLXPipeline:
         video = None
         video_slice = None
         frames = None
+        abort = None
         try:
             from mlx_video.models.wan_2.utils import load_vae_decoder
             from mlx_video.models.wan_2.vae22 import denormalize_latents
@@ -766,7 +790,9 @@ class Wan22MLXPipeline:
         except Exception as exc:
             vae = z = video = video_slice = frames = latents = None
             gc.collect()
-            self._abort_after_runtime_failure("decode", exc)
+            abort = self._runtime_abort_after_failure("decode", exc)
+        if abort is not None:
+            raise abort
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
         self._fail_if_runtime_failed("video_encode")
@@ -786,6 +812,7 @@ class Wan22MLXPipeline:
             )
         self._ensure_mlx_runtime_ready("video_encode")
         temp_path: Path | None = None
+        abort = None
         try:
             from mlx_video.models.wan_2.postprocess import save_video
 
@@ -803,7 +830,9 @@ class Wan22MLXPipeline:
                     pass
             frames = None
             gc.collect()
-            self._abort_after_runtime_failure("video_encode", exc)
+            abort = self._runtime_abort_after_failure("video_encode", exc)
+        if abort is not None:
+            raise abort
 
     def write_output(self, video: Any | Path, output_dir: Path, *, run_id: str) -> Path:
         self._fail_if_runtime_failed("write_output")
@@ -827,6 +856,7 @@ class Wan22MLXPipeline:
                 "failed before initializing MLX"
             )
         self._ensure_mlx_runtime_ready("file_write")
+        abort = None
         try:
             from mlx_video.models.wan_2.postprocess import save_video
 
@@ -834,7 +864,9 @@ class Wan22MLXPipeline:
             self._check_memory("file_write after")
             return output_path
         except Exception as exc:
-            self._abort_after_runtime_failure("write_output", exc)
+            abort = self._runtime_abort_after_failure("write_output", exc)
+        if abort is not None:
+            raise abort
 
 
 def create_wan22_pipeline(**kwargs: Any) -> Wan22MLXPipeline:
