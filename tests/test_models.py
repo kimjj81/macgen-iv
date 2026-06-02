@@ -60,11 +60,21 @@ def test_model_discovery_rejects_excessive_directory_traversal(tmp_path, monkeyp
     root.mkdir()
     walked = [root / "wan-one", root / "wan-two"]
 
-    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(walked))
     monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ())
 
     with pytest.raises(ValueError, match="visited more than 1 directories"):
         discover_models([root], model="wan2.2", max_dirs=1)
+
+
+def test_model_discovery_rejects_high_fanout_before_stack_growth(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    for index in range(3):
+        (root / f"child-{index}").mkdir()
+
+    with pytest.raises(ValueError, match="queued more than 2 directories"):
+        discover_models([root], model="wan2.2", max_dirs=2)
 
 
 def test_model_discovery_rejects_excessive_candidate_accumulation(tmp_path, monkeypatch):
@@ -72,7 +82,7 @@ def test_model_discovery_rejects_excessive_candidate_accumulation(tmp_path, monk
     root.mkdir()
     walked = [root / "wan-one", root / "wan-two"]
 
-    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(walked))
     monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ("config.json",))
 
     with pytest.raises(ValueError, match="found more than 1 candidates"):
@@ -96,7 +106,7 @@ def test_model_discovery_rejects_excessive_flat_file_scan(tmp_path, monkeypatch)
     for index in range(3):
         (root / f"nonmatch-{index}.txt").write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(()))
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(()))
 
     with pytest.raises(ValueError, match="scanned more than 2 files"):
         discover_models([root], model="wan2.2", max_files=2)
@@ -234,6 +244,26 @@ def test_model_dirs_from_env_rejects_oversized_entry(tmp_path):
 
     with pytest.raises(ValueError, match="FASTGEN_MODEL_DIR_WAN22 entry exceeds 4096 chars"):
         model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_merge_model_dirs_rejects_too_many_new_entries_before_env_write(tmp_path):
+    env_file = tmp_path / ".env"
+    new_dirs = (tmp_path / f"model-{index}" for index in range(1_025))
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS contains more than 1024 entries"):
+        merge_model_dirs_into_env(env_file, new_dirs)
+
+    assert not env_file.exists()
+
+
+def test_replace_model_dirs_rejects_oversized_env_value_before_write(tmp_path):
+    env_file = tmp_path / ".env"
+    long_dirs = (tmp_path / ("model-" + ("x" * 90) + str(index)) for index in range(900))
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS value exceeds 65536 chars"):
+        replace_model_dirs_in_env(env_file, long_dirs)
+
+    assert not env_file.exists()
 
 
 def test_load_env_file_rejects_oversized_file_before_parsing(tmp_path):

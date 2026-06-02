@@ -326,9 +326,9 @@ class Wan22MLXPipeline:
         try:
             mx.eval(target)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
+            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
-            mlx_cleanup()
+            _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 "Runtime memory abort [wan2.2 synchronize]: MLX synchronization failed; "
                 "aborting because Metal runtime state may be unsafe."
@@ -340,7 +340,7 @@ class Wan22MLXPipeline:
         except Exception as exc:
             from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
-            _cleanup_loaded_runtime_after_error()
+            _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 f"Runtime memory abort [wan2.2 {phase}]: MLX eval failed; "
                 "aborting because Metal runtime state may be unsafe."
@@ -1127,13 +1127,25 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
 
 
 def _clear_traceback_frames(exc: BaseException) -> None:
-    tb = exc.__traceback__
-    while tb is not None:
-        try:
-            tb.tb_frame.clear()
-        except RuntimeError:
-            pass
-        tb = tb.tb_next
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
 
 
 def _positive_int_tuple(

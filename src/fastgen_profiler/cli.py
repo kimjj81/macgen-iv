@@ -36,11 +36,13 @@ from .metrics import (
 from .models import (
     IMPORT_SOURCES,
     ModelCandidate,
+    bounded_model_dir_paths,
     candidate_to_dict,
     discover_generation_model_dirs,
     direct_model_candidate,
     discover_import_dirs,
     discover_models,
+    model_dirs_env_value,
     model_dirs_from_sources,
     replace_model_dirs_in_env,
     resolve_model_candidate,
@@ -1846,8 +1848,16 @@ def _import_model_dirs(
     if source in {"ollama", "lmstudio", "all"}:
         typer.echo("Note: LM Studio/Ollama LLM-only and GGUF-only directories are not registered for this video generation profiler.")
 
-    replacement_preview = [path.expanduser().resolve() for path in generation_dirs]
-    typer.echo(f"FASTGEN_MODEL_DIRS={':'.join(str(path) for path in replacement_preview)}")
+    try:
+        replacement_preview = bounded_model_dir_paths(
+            (path.expanduser().resolve() for path in generation_dirs),
+            label="FASTGEN_MODEL_DIRS",
+        )
+        replacement_value = model_dirs_env_value(replacement_preview, label="FASTGEN_MODEL_DIRS")
+    except ValueError as exc:
+        typer.echo(f"[guard] import blocked: {_safe_exception_text(exc)}")
+        return 1
+    typer.echo(f"FASTGEN_MODEL_DIRS={replacement_value}")
     if dry_run:
         typer.echo("Dry run: .env was not modified.")
         return 0
@@ -1861,7 +1871,7 @@ def _import_model_dirs(
             typer.echo("Import cancelled.")
             return 0
 
-    replacement = replace_model_dirs_in_env(env_file, generation_dirs)
+    replacement = replace_model_dirs_in_env(env_file, replacement_preview)
     typer.echo(f"Updated {env_file}: {len(replacement)} model directories registered.")
     return 0
 

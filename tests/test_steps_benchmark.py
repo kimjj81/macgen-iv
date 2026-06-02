@@ -1160,6 +1160,47 @@ def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeyp
     assert cleanup_calls == ["cleanup"]
 
 
+def test_steps_benchmark_eval_failure_clears_cause_traceback_before_cleanup(tmp_path, monkeypatch):
+    import gc
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_eval_cause_release_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+
+    class HeavyLocal:
+        pass
+
+    ref: weakref.ReferenceType[object] | None = None
+
+    class FakeMx:
+        def eval(self, target):
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("metal eval failed")
+
+    cleanup_calls: list[str] = []
+
+    def cleanup():
+        gc.collect()
+        assert ref is not None
+        assert ref() is None
+        cleanup_calls.append("cleanup")
+        return {"freed_gb": 0}
+
+    monkeypatch.setattr(module, "mlx_cleanup", cleanup)
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed"):
+        module._eval_mlx(FakeMx(), object(), label="eval cause")
+
+    assert cleanup_calls == ["cleanup"]
+
+
 def test_steps_benchmark_child_cleanup_clears_traceback_locals_before_mlx_cleanup(tmp_path, monkeypatch):
     import gc
     import importlib.util

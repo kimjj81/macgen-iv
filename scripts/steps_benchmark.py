@@ -115,6 +115,7 @@ def _eval_mlx(mx, target, *, label: str) -> None:
     try:
         mx.eval(target)
     except Exception as exc:
+        _clear_exception_traceback_frames(exc)
         mlx_cleanup()
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: MLX eval failed; "
@@ -352,13 +353,25 @@ def run_single(steps: int):
 def _clear_exception_traceback_frames(exc: BaseException | None) -> None:
     if exc is None:
         return
-    tb = exc.__traceback__
-    while tb is not None:
-        try:
-            tb.tb_frame.clear()
-        except RuntimeError:
-            pass
-        tb = tb.tb_next
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
 
 
 def _check_decoded_video_shape(video, *, label: str) -> None:

@@ -3945,6 +3945,35 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(MemoryGuardError, match="token sequence is 3 tokens"):
             pipe.encode_text({"prompt": "prompt", "negative_prompt": ""})
 
+    def test_ltx23_text_encoder_dependency_check_runs_before_mlx_runtime_guard(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
+        _install_fake_transformers_tokenizer(monkeypatch)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_lm" else object(),
+        )
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path / "model",
+            text_encoder_dir=text_encoder_dir,
+            tokenizer_dir=tokenizer_dir,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._ensure_mlx_runtime_ready = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("runtime guard must not run before mlx_lm dependency preflight")
+        )
+
+        with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+            pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 16)
+
     def test_ltx23_encode_text_checks_runtime_before_text_projection_safetensors_load(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6179,6 +6208,38 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="latent shape .* expected"):
             pipe.decode(FakeLatents())
 
+    def test_ltx23_decode_dependency_check_runs_before_mlx_runtime_guard(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        vae_decoder_dir = tmp_path / "vae" / "decoder"
+        vae_decoder_dir.mkdir(parents=True)
+        (vae_decoder_dir / "decoder.safetensors").write_bytes(b"x")
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._ensure_mlx_runtime_ready = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("runtime guard must not run before dependency preflight")
+        )
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
+
+        with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+            pipe.decode(FakeLatents())
+        assert pipe._decode_started is False
+
     def test_wan22_decode_rejects_latent_shape_before_vae_import(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
 
@@ -6387,7 +6448,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
-    def test_ltx23_cleanup_clears_traceback_locals_before_mlx_cleanup(self, monkeypatch):
+    def test_ltx23_cleanup_clears_chained_traceback_locals_before_mlx_cleanup(self, monkeypatch):
         import gc
         from fastgen_profiler.backends import ltx23_mlx_adapter
 
@@ -6395,12 +6456,15 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pass
 
         def make_exception():
-            heavy = HeavyLocal()
-            ref = weakref.ref(heavy)
             try:
-                raise RuntimeError("runtime failed while heavy local was alive")
-            except RuntimeError as exc:
-                return exc, ref
+                heavy = HeavyLocal()
+                ref = weakref.ref(heavy)
+                raise RuntimeError("inner runtime failed while heavy local was alive")
+            except RuntimeError as inner:
+                try:
+                    raise RuntimeError("outer adapter abort") from inner
+                except RuntimeError as outer:
+                    return outer, ref
 
         exc, ref = make_exception()
         assert ref() is not None
@@ -6771,7 +6835,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
-    def test_wan22_cleanup_clears_traceback_locals_before_mlx_cleanup(self, monkeypatch):
+    def test_wan22_cleanup_clears_chained_traceback_locals_before_mlx_cleanup(self, monkeypatch):
         import gc
         from fastgen_profiler.backends import wan22_mlx_adapter
 
@@ -6779,12 +6843,15 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pass
 
         def make_exception():
-            heavy = HeavyLocal()
-            ref = weakref.ref(heavy)
             try:
-                raise RuntimeError("runtime failed while heavy local was alive")
-            except RuntimeError as exc:
-                return exc, ref
+                heavy = HeavyLocal()
+                ref = weakref.ref(heavy)
+                raise RuntimeError("inner runtime failed while heavy local was alive")
+            except RuntimeError as inner:
+                try:
+                    raise RuntimeError("outer adapter abort") from inner
+                except RuntimeError as outer:
+                    return outer, ref
 
         exc, ref = make_exception()
         assert ref() is not None

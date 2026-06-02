@@ -33,6 +33,15 @@ _MAX_CONFIG_JSON_ITEMS = 10_000
 _MAX_CONFIG_JSON_DEPTH = 32
 
 
+def _dependency_available(module_name: str) -> bool:
+    module_prefix = f"{module_name}."
+    return (
+        module_name in sys.modules
+        or any(name.startswith(module_prefix) for name in sys.modules)
+        or importlib.util.find_spec(module_name) is not None
+    )
+
+
 def _flatten_parameter_names(parameters: Any, prefix: str = "", *, label: str = "parameters") -> set[str]:
     result: set[str] = set()
     stack: list[tuple[Any, str, int]] = [(parameters, prefix, 0)]
@@ -476,9 +485,9 @@ class LTX23MLXPipeline:
         try:
             mx.eval(target)
         except Exception as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
+            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
-            mlx_cleanup()
+            _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 "Runtime memory abort [ltx2.3 synchronize]: MLX synchronization failed; "
                 "aborting because Metal runtime state may be unsafe."
@@ -490,7 +499,7 @@ class LTX23MLXPipeline:
         except Exception as exc:
             from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
-            _cleanup_loaded_runtime_after_error()
+            _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 f"Runtime memory abort [ltx2.3 {phase}]: MLX eval failed; "
                 "aborting because Metal runtime state may be unsafe."
@@ -721,6 +730,11 @@ class LTX23MLXPipeline:
             hidden_size=hidden_size,
             label="ltx2.3 text_encoder",
         )
+        if not _dependency_available("mlx_lm"):
+            raise ModuleNotFoundError(
+                "mlx_lm is required for the LTX2.3 text encoder; dependency check "
+                "failed before initializing MLX"
+            )
 
         self._ensure_mlx_runtime_ready("text_encoder")
 
@@ -975,6 +989,11 @@ class LTX23MLXPipeline:
         upscaler_path = self.model_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
         if upscaler_path.exists():
             self._check_file_load(upscaler_path, "preflight upsampler")
+        if not _dependency_available("mlx_video"):
+            raise ModuleNotFoundError(
+                "mlx_video is required for LTX2.3 decode; dependency check "
+                "failed before initializing MLX"
+            )
 
         self._decode_started = True
         self._ensure_mlx_runtime_ready("decode")
@@ -1607,13 +1626,25 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
 
 
 def _clear_traceback_frames(exc: BaseException) -> None:
-    tb = exc.__traceback__
-    while tb is not None:
-        try:
-            tb.tb_frame.clear()
-        except RuntimeError:
-            pass
-        tb = tb.tb_next
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
 
 
 def _iter_config_numbers(value: Any, prefix: str = ""):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import chain
 import os
 from pathlib import Path
 from typing import Iterable
@@ -162,16 +163,17 @@ def merge_model_dirs_into_env(
     max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
 ) -> list[Path]:
     env_values = load_env_file(env_file, max_bytes=max_bytes)
-    merged = _dedupe_paths(
-        [
-            *_split_dirs(env_values.get("FASTGEN_MODEL_DIRS")),
-            *(Path(path).expanduser().resolve() for path in new_dirs),
-        ]
+    merged = _dedupe_model_dir_paths(
+        chain(
+            _split_dirs(env_values.get("FASTGEN_MODEL_DIRS")),
+            (Path(path).expanduser().resolve() for path in new_dirs),
+        ),
+        label="FASTGEN_MODEL_DIRS",
     )
     _write_env_value(
         env_file,
         "FASTGEN_MODEL_DIRS",
-        os.pathsep.join(str(path) for path in merged),
+        _model_dirs_env_value(merged, label="FASTGEN_MODEL_DIRS"),
         max_bytes=max_bytes,
     )
     return merged
@@ -183,11 +185,14 @@ def replace_model_dirs_in_env(
     *,
     max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
 ) -> list[Path]:
-    replacement = _dedupe_paths(Path(path).expanduser().resolve() for path in new_dirs)
+    replacement = _dedupe_model_dir_paths(
+        (Path(path).expanduser().resolve() for path in new_dirs),
+        label="FASTGEN_MODEL_DIRS",
+    )
     _write_env_value(
         env_file,
         "FASTGEN_MODEL_DIRS",
-        os.pathsep.join(str(path) for path in replacement),
+        _model_dirs_env_value(replacement, label="FASTGEN_MODEL_DIRS"),
         max_bytes=max_bytes,
     )
     return replacement
@@ -212,7 +217,7 @@ def discover_models(
     for root in _dedupe_paths(roots):
         if not root.exists() or not root.is_dir():
             continue
-        for path in _walk_dirs(root):
+        for path in _walk_dirs(root, max_dirs=max_dirs):
             visited_dirs += 1
             if visited_dirs > max_dirs:
                 raise ValueError(
@@ -338,8 +343,55 @@ def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
     return deduped
 
 
-def _walk_dirs(root: Path) -> Iterable[Path]:
+def bounded_model_dir_paths(paths: Iterable[Path], *, label: str = "FASTGEN_MODEL_DIRS") -> list[Path]:
+    return _dedupe_model_dir_paths(paths, label=label)
+
+
+def model_dirs_env_value(paths: Iterable[Path], *, label: str = "FASTGEN_MODEL_DIRS") -> str:
+    return _model_dirs_env_value(_dedupe_model_dir_paths(paths, label=label), label=label)
+
+
+def _dedupe_model_dir_paths(paths: Iterable[Path], *, label: str) -> list[Path]:
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        expanded = path.expanduser()
+        key = str(expanded)
+        if key in seen:
+            continue
+        if len(deduped) >= DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES:
+            raise ValueError(
+                f"{label} contains more than {DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES} entries"
+            )
+        if len(key) > DEFAULT_MODEL_DIR_PATH_MAX_CHARS:
+            raise ValueError(
+                f"{label} entry exceeds {DEFAULT_MODEL_DIR_PATH_MAX_CHARS} chars"
+            )
+        seen.add(key)
+        deduped.append(expanded)
+    return deduped
+
+
+def _model_dirs_env_value(paths: Iterable[Path], *, label: str) -> str:
+    parts: list[str] = []
+    total_chars = 0
+    separator_chars = len(os.pathsep)
+    for path in paths:
+        part = str(path)
+        total_chars += len(part)
+        if parts:
+            total_chars += separator_chars
+        if total_chars > DEFAULT_MODEL_DIRS_ENV_MAX_CHARS:
+            raise ValueError(
+                f"{label} value exceeds {DEFAULT_MODEL_DIRS_ENV_MAX_CHARS} chars"
+            )
+        parts.append(part)
+    return os.pathsep.join(parts)
+
+
+def _walk_dirs(root: Path, *, max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS) -> Iterable[Path]:
     stack = [root]
+    queued_dirs = 1
     while stack:
         current = stack.pop()
         yield current
@@ -353,6 +405,12 @@ def _walk_dirs(root: Path) -> Iterable[Path]:
                         continue
                     if entry.name in SKIP_DIR_NAMES or entry.name.startswith("."):
                         continue
+                    queued_dirs += 1
+                    if queued_dirs > max_dirs:
+                        raise ValueError(
+                            f"model discovery queued more than {max_dirs} directories; "
+                            "narrow --model-dir or import source"
+                        )
                     stack.append(Path(entry.path))
         except OSError:
             continue

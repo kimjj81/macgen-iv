@@ -2241,6 +2241,34 @@ def test_models_import_writes_env_non_interactive(tmp_path, monkeypatch):
     assert str(old_dir) not in content
 
 
+def test_models_import_rejects_too_many_generation_dirs_before_preview(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "ComfyUI/models"
+    root.mkdir(parents=True)
+    env_file = tmp_path / ".env"
+    too_many_dirs = [tmp_path / f"model-{index}" for index in range(1_025)]
+
+    monkeypatch.setattr(cli_module, "discover_import_dirs", lambda source: [root])
+    monkeypatch.setattr(cli_module, "discover_generation_model_dirs", lambda roots: too_many_dirs)
+
+    exit_code = main(
+        [
+            "models",
+            "import",
+            "--source",
+            "comfyui",
+            "--env-file",
+            str(env_file),
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "[guard] import blocked: FASTGEN_MODEL_DIRS contains more than 1024 entries" in output
+    assert "FASTGEN_MODEL_DIRS=" not in output
+    assert not env_file.exists()
+
+
 def test_models_import_fails_when_roots_have_no_generation_models(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     lmstudio_dir = tmp_path / ".cache/lm-studio/models"
