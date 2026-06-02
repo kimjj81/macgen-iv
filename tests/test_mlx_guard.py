@@ -3737,6 +3737,50 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="context shape .* expected"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
+    def test_ltx23_denoise_dependency_check_runs_before_mlx_runtime_guard(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        class FakeContext:
+            shape = (1, 16)
+
+        fake_mx = types.SimpleNamespace(
+            array=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("mx.array must not run before dependency preflight")
+            ),
+            float32="float32",
+        )
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.config = types.SimpleNamespace(in_channels=128, cross_attention_dim=16)
+        pipe.model = object()
+        pipe.context_emb = FakeContext()
+        pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("runtime memory check must not run before dependency preflight")
+        )
+        pipe._ensure_mlx_runtime_ready = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("runtime guard must not run before dependency preflight")
+        )
+
+        with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
+
     def test_ltx23_encode_text_resolves_text_assets_before_mlx_import(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 

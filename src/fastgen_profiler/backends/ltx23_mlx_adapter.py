@@ -871,6 +871,11 @@ class LTX23MLXPipeline:
         phase = f"denoise {step_index + 1}/{steps}"
         latent_shape = self._validate_latents_shape(latents, phase)
         context_shape = self._validate_context_shape(self.context_emb, phase)
+        if not _dependency_available("mlx_video"):
+            raise ModuleNotFoundError(
+                "mlx_video is required for LTX2.3 denoise; dependency check "
+                "failed before initializing MLX"
+            )
 
         self._check_memory(f"{phase} before")
         self._ensure_mlx_runtime_ready("denoise")
