@@ -36,6 +36,7 @@ from fastgen_profiler.mlx_guard import (
     run_counter,
     should_restart_process,
     DEFAULT_MAX_PROMPT_CHARS,
+    MAX_PROMPT_CHARS as HARD_MAX_PROMPT_CHARS,
     MAX_CONSECUTIVE_RUNS,
     COOLDOWN_SECONDS,
 )
@@ -49,6 +50,7 @@ MAX_FPS = 240
 MAX_STEPS = 512
 MAX_STEP_VALUES = 16
 MAX_CHILD_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_SEED = 2**32 - 1
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -115,7 +117,11 @@ OUTPUT_BASE = Path(os.environ.get(
     "FASTGEN_STEPS_OUTPUT_BASE",
     str(REPO_ROOT / "artifacts" / "steps_benchmark"),
 ))
-MAX_PROMPT_CHARS = _env_positive_int("FASTGEN_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
+MAX_PROMPT_CHARS = _env_capped_positive_int(
+    "FASTGEN_MAX_PROMPT_CHARS",
+    DEFAULT_MAX_PROMPT_CHARS,
+    HARD_MAX_PROMPT_CHARS,
+)
 PROMPT = _env_bounded_text(
     "FASTGEN_STEPS_PROMPT",
     "A golden retriever running through a sunlit meadow, cinematic, slow motion",
@@ -130,7 +136,7 @@ WIDTH = _env_capped_positive_int("FASTGEN_STEPS_WIDTH", 512, MAX_DIMENSION)
 HEIGHT = _env_capped_positive_int("FASTGEN_STEPS_HEIGHT", 512, MAX_DIMENSION)
 FRAMES = _env_capped_positive_int("FASTGEN_STEPS_FRAMES", 9, MAX_FRAMES)
 FPS = _env_capped_positive_int("FASTGEN_STEPS_FPS", 24, MAX_FPS)
-SEED = int(os.environ.get("FASTGEN_STEPS_SEED", "42"))
+SEED = _env_capped_positive_int("FASTGEN_STEPS_SEED", 42, MAX_SEED)
 STEP_VALUES = _env_step_values("FASTGEN_STEPS_VALUES", "1")
 ALLOW_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_HEAVY") == "1"
 ALLOW_MULTIPLE_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY") == "1"

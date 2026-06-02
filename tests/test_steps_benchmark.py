@@ -88,6 +88,16 @@ def test_steps_benchmark_rejects_invalid_positive_integer_env(tmp_path, monkeypa
             "FASTGEN_STEPS_FPS must be no greater than 240",
         ),
         (
+            "FASTGEN_STEPS_SEED",
+            str(2**32),
+            "FASTGEN_STEPS_SEED must be no greater than 4294967295",
+        ),
+        (
+            "FASTGEN_MAX_PROMPT_CHARS",
+            "65537",
+            "FASTGEN_MAX_PROMPT_CHARS must be no greater than 65536",
+        ),
+        (
             "FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS",
             str(24 * 60 * 60 + 1),
             "FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS must be no greater than 86400",
@@ -155,6 +165,21 @@ def test_steps_benchmark_rejects_oversized_prompt_env_at_import(tmp_path, monkey
     monkeypatch.setenv(env_name, "x" * 9)
 
     with pytest.raises(Exception, match=f"{env_name} must be no longer than 8 chars"):
+        spec.loader.exec_module(module)
+
+
+def test_steps_benchmark_rejects_unbounded_prompt_limit_at_import(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_prompt_limit_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_MAX_PROMPT_CHARS", "1000000")
+
+    with pytest.raises(Exception, match="FASTGEN_MAX_PROMPT_CHARS must be no greater than"):
         spec.loader.exec_module(module)
 
 

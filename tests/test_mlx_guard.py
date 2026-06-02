@@ -1213,6 +1213,12 @@ class TestAllocationBudget:
         with pytest.raises(MemoryGuardError, match="FASTGEN_MAX_PROMPT_CHARS"):
             check_text_prompt_budget(prompt="hello")
 
+    def test_prompt_budget_rejects_unbounded_max_prompt_env(self, monkeypatch):
+        monkeypatch.setenv("FASTGEN_MAX_PROMPT_CHARS", "65537")
+
+        with pytest.raises(MemoryGuardError, match="FASTGEN_MAX_PROMPT_CHARS must be no greater than 65536"):
+            check_text_prompt_budget(prompt="hello")
+
     def test_token_sequence_budget_rejects_over_model_limit(self):
         with pytest.raises(MemoryGuardError, match="token sequence is 9 tokens"):
             check_token_sequence_budget(
@@ -5840,3 +5846,21 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(FileNotFoundError, match="Set auto_download=True explicitly"):
             ensure_text_encoder(tmp_path / "missing")
+
+    def test_ltx23_text_encoder_helper_rejects_excessive_local_asset_scan(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_text_encoder_download
+        from fastgen_profiler.backends.ltx23_text_encoder_download import ensure_text_encoder
+
+        text_encoder = tmp_path / "text_encoder"
+        tokenizer = tmp_path / "tokenizer"
+        text_encoder.mkdir()
+        tokenizer.mkdir()
+        (text_encoder / "config.json").write_text("{}", encoding="utf-8")
+        (text_encoder / "a.safetensors").write_bytes(b"x")
+        (text_encoder / "b.safetensors").write_bytes(b"x")
+        (tokenizer / "tokenizer.json").write_bytes(b"x")
+        (tokenizer / "tokenizer_config.json").write_bytes(b"x")
+        monkeypatch.setattr(ltx23_text_encoder_download, "_MAX_TEXT_ENCODER_SCAN_FILES", 0)
+
+        with pytest.raises(MemoryGuardError, match="exceeded 0 files"):
+            ensure_text_encoder(tmp_path)

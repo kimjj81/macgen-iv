@@ -1,8 +1,10 @@
 """Download helper for LTX2.3 text encoder assets."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+
+_MAX_TEXT_ENCODER_SCAN_FILES = 10_000
 
 
 def ensure_text_encoder(
@@ -66,7 +68,7 @@ def ensure_text_encoder(
     # Move/create a symlink so tokenizer_dir points to the same location
     # (AutoTokenizer can load from the text_encoder dir too).
     tokenizer_dir.mkdir(parents=True, exist_ok=True)
-    for f in text_encoder_dir.iterdir():
+    for f in _bounded_files(text_encoder_dir, "link tokenizer files"):
         if _is_tokenizer_file(f.name) and not (tokenizer_dir / f.name).exists():
             (tokenizer_dir / f.name).symlink_to(f)
 
@@ -81,10 +83,8 @@ def _is_text_encoder_ready(te_dir: Path, tok_dir: Path) -> bool:
     if not te_dir.exists() or not tok_dir.exists():
         return False
     has_config = (te_dir / "config.json").exists()
-    has_tokenizer = any(_is_tokenizer_file(f.name) for f in tok_dir.iterdir())
-    has_weights = any(
-        f.name.endswith(".safetensors") for f in te_dir.iterdir()
-    )
+    has_tokenizer = any(_is_tokenizer_file(f.name) for f in _bounded_files(tok_dir, "scan tokenizer"))
+    has_weights = any(f.name.endswith(".safetensors") for f in _bounded_files(te_dir, "scan text_encoder"))
     return has_config and has_tokenizer and has_weights
 
 
@@ -110,3 +110,27 @@ def _raise_missing(te_dir: Path, tok_dir: Path) -> None:
         f"  2. Provide text_encoder_dir/tokenizer_dir explicitly.\n"
         f"  3. Place them at <model_path>/../LTX-2-text-local/."
     )
+
+
+def _bounded_files(path: Path, label: str):
+    scanned = 0
+    try:
+        for entry in path.iterdir():
+            scanned += 1
+            if scanned > _MAX_TEXT_ENCODER_SCAN_FILES:
+                _raise_scan_error(
+                    f"LTX2.3 text encoder {label} exceeded {_MAX_TEXT_ENCODER_SCAN_FILES} files in {path}; "
+                    "refusing unbounded local asset scan"
+                )
+            if entry.is_file():
+                yield entry
+    except OSError:
+        _raise_scan_error(
+            f"LTX2.3 text encoder {label} could not scan {path}; refusing unbounded local asset scan"
+        )
+
+
+def _raise_scan_error(message: str) -> None:
+    from fastgen_profiler.mlx_guard import MemoryGuardError
+
+    raise MemoryGuardError(message)

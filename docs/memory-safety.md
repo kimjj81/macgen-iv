@@ -35,6 +35,8 @@ before parser allocation or MLX/video package imports.
 Local asset preload scans must cap directory and file counts before summing
 weights or tokenizer files, because the scan itself runs before model package
 loading and outside MLX allocator counters.
+Text encoder readiness/download helpers must also cap local asset scans before
+checking tokenizer and weight presence.
 
 `mlx_cleanup()` must not initialize MLX in a fresh process. It may only clear
 MLX caches when `mlx.core` is already loaded in the current process.
@@ -119,12 +121,14 @@ Direct benchmark scripts must be safe by default.
 - Safety-related numeric environment variables, including shape, timeout, log
   tail, and child-result limits, must be parsed as positive integers. Invalid
   or non-positive values must fail closed instead of weakening a guard. Shape,
-  step-count, FPS, timeout, and child I/O overrides must also have hard caps so
+  seed, step-count, FPS, timeout, and child I/O overrides must also have hard caps so
   malformed direct-script invocations cannot request unbounded control
   structures or obviously unsafe MLX workloads before guard checks.
 - Direct-script prompt environment variables must be capped at import time, so
   safe default invocations cannot carry oversized prompt text into later guard,
   tokenizer, or result serialization paths.
+- Prompt-limit environment overrides must have their own hard cap; otherwise a
+  user-provided limit can disable the prompt budget before tokenizer allocation.
 - Child-mode environment variables must also be validated: the step count must
   be positive, and the child result path must remain inside the configured
   output directory.

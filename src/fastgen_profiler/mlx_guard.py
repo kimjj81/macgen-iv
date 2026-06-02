@@ -59,6 +59,7 @@ DEFAULT_MLX_MEMORY_FRACTION = 0.80
 DEFAULT_MLX_CACHE_LIMIT_BYTES = 1 * 1024 ** 3  # 1 GB
 MIN_MLX_MEMORY_LIMIT_BYTES = 512 * 1024 ** 2  # 512 MiB
 DEFAULT_MAX_PROMPT_CHARS = 8192
+MAX_PROMPT_CHARS = 65_536
 
 # Adaptive batch sizing defaults.
 ADAPTIVE_INITIAL_FRAMES = 5
@@ -800,6 +801,10 @@ def _max_prompt_chars() -> int:
         raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}") from exc
     if value <= 0:
         raise MemoryGuardError(f"FASTGEN_MAX_PROMPT_CHARS must be a positive integer, got {raw!r}")
+    if value > MAX_PROMPT_CHARS:
+        raise MemoryGuardError(
+            f"FASTGEN_MAX_PROMPT_CHARS must be no greater than {MAX_PROMPT_CHARS}, got {value}"
+        )
     return value
 
 
