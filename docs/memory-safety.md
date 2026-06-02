@@ -60,6 +60,9 @@ large file reads, tensor materialization, NumPy conversion, or video encoding.
 Video postprocess and frame export preflights must reserve more than the input
 frame buffer because lower-level encoders and image writers may allocate
 contiguous, converted, or temporary buffers outside MLX allocator counters.
+Model config dimensions used for preflight budgeting must be real integer
+values. Float or string coercion is unsafe because truncation or implicit
+conversion can understate the allocation floor before MLX/Metal construction.
 
 ## Direct Scripts
 
@@ -73,7 +76,9 @@ Direct benchmark scripts must be safe by default.
   not be reused after a failed child process.
 - Parent processes must not capture unbounded child stdout/stderr or read
   unbounded child result files into memory. Child logs should spool to disk,
-  and child result files must have a small maximum size.
+  and child result files must have a small maximum size. User-configurable
+  child log-tail and result-file read limits must also have hard caps; the
+  direct steps benchmark currently caps each at 1 MiB.
 - Parent processes may run system-only memory checks and cooldowns between
   child processes, but must not import MLX for that recovery path.
 - Direct benchmark scripts must not configure MLX allocator limits before the

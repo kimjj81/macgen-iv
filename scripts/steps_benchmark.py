@@ -50,6 +50,13 @@ def _env_positive_int(name: str, default: int) -> int:
     return _positive_int_value(name, raw)
 
 
+def _env_capped_positive_int(name: str, default: int, max_value: int) -> int:
+    value = _env_positive_int(name, default)
+    if value > max_value:
+        raise MemoryGuardError(f"{name} must be no greater than {max_value}, got {value}")
+    return value
+
+
 def _positive_int_value(name: str, raw: str) -> int:
     try:
         value = int(raw)
@@ -90,8 +97,17 @@ CHILD_MODE_ENV = "FASTGEN_STEPS_CHILD"
 CHILD_STEP_ENV = "FASTGEN_STEPS_CHILD_STEP"
 CHILD_RESULT_ENV = "FASTGEN_STEPS_CHILD_RESULT"
 CHILD_TIMEOUT_SECONDS = _env_positive_int("FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS", 60 * 60)
-CHILD_LOG_TAIL_BYTES = _env_positive_int("FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES", 64 * 1024)
-CHILD_RESULT_MAX_BYTES = _env_positive_int("FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES", 1024 * 1024)
+CHILD_IO_MAX_BYTES = 1024 * 1024
+CHILD_LOG_TAIL_BYTES = _env_capped_positive_int(
+    "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES",
+    64 * 1024,
+    CHILD_IO_MAX_BYTES,
+)
+CHILD_RESULT_MAX_BYTES = _env_capped_positive_int(
+    "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES",
+    CHILD_IO_MAX_BYTES,
+    CHILD_IO_MAX_BYTES,
+)
 
 # Exit code to signal orchestrator that the process should be restarted.
 EXIT_RESTART = 10

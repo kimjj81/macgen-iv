@@ -1392,6 +1392,28 @@ class TestAdaptiveBatchManager:
         assert decision.frames == 10
         assert decision.steps == 8
 
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"initial_frames": 0}, "initial_frames must be a positive integer"),
+            ({"initial_steps": True}, "initial_steps must be a positive integer"),
+            ({"target_frames": -1}, "target_frames must be a positive integer"),
+            ({"target_steps": 4.5}, "target_steps must be a positive integer"),
+            ({"min_frames": "5"}, "min_frames must be a positive integer"),
+            ({"min_steps": False}, "min_steps must be a positive integer"),
+            ({"headroom_grow_threshold": float("nan")}, "headroom_grow_threshold must be a finite number"),
+            ({"headroom_shrink_threshold": 1.5}, "headroom_shrink_threshold must be in \\[0, 1\\]"),
+            ({"max_growth_factor": 1.0}, "max_growth_factor must be a finite number greater than 1"),
+            ({"initial_frames": 26}, "initial_frames cannot exceed target_frames"),
+            ({"initial_steps": 17}, "initial_steps cannot exceed target_steps"),
+            ({"min_frames": 26}, "min_frames cannot exceed target_frames"),
+            ({"min_steps": 17}, "min_steps cannot exceed target_steps"),
+        ],
+    )
+    def test_rejects_invalid_adaptive_config(self, kwargs, message):
+        with pytest.raises(MemoryGuardError, match=message):
+            AdaptiveBatchConfig(**kwargs)
+
 
 class TestAdaptiveBatchConfigFromRun:
     def test_creates_config(self):
@@ -1405,6 +1427,19 @@ class TestAdaptiveBatchConfigFromRun:
         cfg = adaptive_batch_config_from_run(target_frames=3, target_steps=2)
         assert cfg.initial_frames == 3
         assert cfg.initial_steps == 2
+
+    @pytest.mark.parametrize(
+        ("target_frames", "target_steps", "message"),
+        [
+            (0, 4, "target_frames must be a positive integer"),
+            (4, 0, "target_steps must be a positive integer"),
+            (True, 4, "target_frames must be a positive integer"),
+            (4, 1.5, "target_steps must be a positive integer"),
+        ],
+    )
+    def test_rejects_invalid_targets(self, target_frames, target_steps, message):
+        with pytest.raises(MemoryGuardError, match=message):
+            adaptive_batch_config_from_run(target_frames=target_frames, target_steps=target_steps)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -2069,6 +2104,30 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 pipe.load_model()
 
         limits.assert_not_called()
+
+    @pytest.mark.parametrize("value", [1.5, "128"])
+    def test_ltx23_structural_config_rejects_non_integer_values(self, value):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import _positive_structural_int
+
+        with pytest.raises(RuntimeMemoryAbort, match="hidden_size=.*must be a positive structural dimension"):
+            _positive_structural_int(value, "hidden_size")
+
+    @pytest.mark.parametrize(
+        ("helper_name", "value", "message"),
+        [
+            ("_positive_int", 1.5, "dim=.*must be a positive integer"),
+            ("_positive_int", "4096", "dim=.*must be a positive integer"),
+            ("_non_negative_int", 1.5, "max_area=.*must be zero or a positive integer"),
+            ("_non_negative_int", "0", "max_area=.*must be zero or a positive integer"),
+        ],
+    )
+    def test_wan22_structural_config_rejects_non_integer_values(self, helper_name, value, message):
+        import fastgen_profiler.backends.wan22_mlx_adapter as wan_adapter
+
+        helper = getattr(wan_adapter, helper_name)
+
+        with pytest.raises(RuntimeMemoryAbort, match=message):
+            helper(value, "dim" if helper_name == "_positive_int" else "max_area")
 
     def test_ltx23_latent_shape_uses_ceil_grid_for_unaligned_shape(self, tmp_path):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -3809,6 +3868,33 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 pipe._check_file_load(path, "read shard")
 
         guard.assert_called_once_with(4096, label="ltx2.3 read shard")
+
+    @pytest.mark.parametrize(
+        ("elements", "multiplier", "message"),
+        [
+            (0, 4, "elements must be a positive integer"),
+            (-1, 4, "elements must be a positive integer"),
+            (True, 4, "elements must be a positive integer"),
+            (1.5, 4, "elements must be a positive integer"),
+            (16, 0, "multiplier must be a positive integer"),
+            (16, False, "multiplier must be a positive integer"),
+            (16, 2.5, "multiplier must be a positive integer"),
+        ],
+    )
+    def test_wan22_mlx_tensor_floor_rejects_invalid_inputs(self, tmp_path, elements, multiplier, message):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(MemoryGuardError, match=message):
+            pipe._check_mlx_tensor_floor(elements, "tensor floor", multiplier=multiplier)  # type: ignore[arg-type]
 
     def test_file_preflight_fails_closed_when_stat_unavailable(self, tmp_path):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline

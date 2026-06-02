@@ -173,8 +173,13 @@ class Wan22MLXPipeline:
             self._check_host_allocation(total * 4, phase)
 
     def _check_mlx_tensor_floor(self, elements: int, phase: str, *, multiplier: int = 4) -> None:
-        if elements <= 0:
-            return
+        from fastgen_profiler.mlx_guard import MemoryGuardError
+
+        for name, value in (("elements", elements), ("multiplier", multiplier)):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise MemoryGuardError(
+                    f"Memory guard [wan2.2 {phase}]: {name} must be a positive integer, got {value!r}"
+                )
         self._check_host_allocation(elements * 4 * multiplier, phase)
 
     def _expected_frame_shape(self) -> tuple[int, int, int, int]:
@@ -771,22 +776,14 @@ def _latent_shape_and_seq_len(width: int, height: int, frames: int, config: Any)
 
 
 def _positive_int(value: Any, key: str) -> int:
-    if isinstance(value, bool):
+    if not isinstance(value, int) or isinstance(value, bool):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
             f"Wan2.2 config field {key}={value!r} must be a positive integer; "
             "refusing to construct MLX model"
         )
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        raise RuntimeMemoryAbort(
-            f"Wan2.2 config field {key}={value!r} must be a positive integer; "
-            "refusing to construct MLX model"
-        ) from exc
+    result = value
     if result <= 0:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -798,22 +795,14 @@ def _positive_int(value: Any, key: str) -> int:
 
 
 def _non_negative_int(value: Any, key: str) -> int:
-    if isinstance(value, bool):
+    if not isinstance(value, int) or isinstance(value, bool):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
             f"Wan2.2 config field {key}={value!r} must be zero or a positive integer; "
             "refusing to construct MLX model"
         )
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        raise RuntimeMemoryAbort(
-            f"Wan2.2 config field {key}={value!r} must be zero or a positive integer; "
-            "refusing to construct MLX model"
-        ) from exc
+    result = value
     if result < 0:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 

@@ -240,10 +240,16 @@ class LTX23MLXPipeline:
         return config_dict
 
     def _preflight_model_config(self, config: dict[str, Any], phase: str) -> None:
-        hidden_size = int(config.get("hidden_size", config.get("caption_channels", 4096)))
-        intermediate_size = int(config.get("intermediate_size", hidden_size * 4))
-        layers = int(config.get("num_layers", config.get("num_hidden_layers", 1)))
-        heads = int(config.get("num_attention_heads", config.get("num_heads", 1)))
+        hidden_size = _positive_structural_int(config.get("hidden_size", config.get("caption_channels", 4096)), "hidden_size")
+        intermediate_size = _positive_structural_int(
+            config.get("intermediate_size", hidden_size * 4),
+            "intermediate_size",
+        )
+        layers = _positive_structural_int(config.get("num_layers", config.get("num_hidden_layers", 1)), "num_layers")
+        heads = _positive_structural_int(
+            config.get("num_attention_heads", config.get("num_heads", 1)),
+            "num_attention_heads",
+        )
         for key, value in {
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
@@ -270,11 +276,17 @@ class LTX23MLXPipeline:
         self._check_host_allocation((attention_floor + mlp_floor + head_floor) * 2, phase)
 
     def _preflight_text_model_config(self, text_config: dict[str, Any], phase: str) -> None:
-        hidden_size = int(text_config.get("hidden_size", 4096))
-        intermediate_size = int(text_config.get("intermediate_size", hidden_size * 4))
-        layers = int(text_config.get("num_hidden_layers", text_config.get("num_layers", 1)))
-        vocab_size = int(text_config.get("vocab_size", 0))
-        heads = int(text_config.get("num_attention_heads", 1))
+        hidden_size = _positive_structural_int(text_config.get("hidden_size", 4096), "hidden_size")
+        intermediate_size = _positive_structural_int(
+            text_config.get("intermediate_size", hidden_size * 4),
+            "intermediate_size",
+        )
+        layers = _positive_structural_int(
+            text_config.get("num_hidden_layers", text_config.get("num_layers", 1)),
+            "num_hidden_layers",
+        )
+        vocab_size = _positive_structural_int(text_config.get("vocab_size", 0), "vocab_size")
+        heads = _positive_structural_int(text_config.get("num_attention_heads", 1), "num_attention_heads")
         for key, value in {
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
@@ -962,22 +974,14 @@ def _latent_grid(size: int) -> int:
 
 
 def _positive_structural_int(value: Any, key: str) -> int:
-    if isinstance(value, bool):
+    if not isinstance(value, int) or isinstance(value, bool):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
             f"LTX2.3 config field {key}={value!r} must be a positive structural dimension; "
             "refusing to construct MLX model"
         )
-    try:
-        result = int(value)
-    except (TypeError, ValueError) as exc:
-        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-
-        raise RuntimeMemoryAbort(
-            f"LTX2.3 config field {key}={value!r} must be a positive structural dimension; "
-            "refusing to construct MLX model"
-        ) from exc
+    result = value
     if result <= 0:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 

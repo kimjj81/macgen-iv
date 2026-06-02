@@ -887,6 +887,61 @@ class AdaptiveBatchConfig:
     min_frames: int = 5
     min_steps: int = 4
 
+    def __post_init__(self) -> None:
+        for name in (
+            "initial_frames",
+            "initial_steps",
+            "target_frames",
+            "target_steps",
+            "min_frames",
+            "min_steps",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise MemoryGuardError(
+                    f"Memory guard [adaptive batch]: {name} must be a positive integer, got {value!r}"
+                )
+        for name in ("headroom_grow_threshold", "headroom_shrink_threshold"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+                raise MemoryGuardError(
+                    f"Memory guard [adaptive batch]: {name} must be a finite number in [0, 1], got {value!r}"
+                )
+            if value < 0 or value > 1:
+                raise MemoryGuardError(
+                    f"Memory guard [adaptive batch]: {name} must be in [0, 1], got {value!r}"
+                )
+        if (
+            not isinstance(self.max_growth_factor, (int, float))
+            or isinstance(self.max_growth_factor, bool)
+            or not math.isfinite(self.max_growth_factor)
+            or self.max_growth_factor <= 1
+        ):
+            raise MemoryGuardError(
+                "Memory guard [adaptive batch]: max_growth_factor must be a finite number greater than 1, "
+                f"got {self.max_growth_factor!r}"
+            )
+        if self.min_frames > self.target_frames:
+            raise MemoryGuardError(
+                "Memory guard [adaptive batch]: min_frames cannot exceed target_frames "
+                f"({self.min_frames} > {self.target_frames})"
+            )
+        if self.min_steps > self.target_steps:
+            raise MemoryGuardError(
+                "Memory guard [adaptive batch]: min_steps cannot exceed target_steps "
+                f"({self.min_steps} > {self.target_steps})"
+            )
+        if self.initial_frames > self.target_frames:
+            raise MemoryGuardError(
+                "Memory guard [adaptive batch]: initial_frames cannot exceed target_frames "
+                f"({self.initial_frames} > {self.target_frames})"
+            )
+        if self.initial_steps > self.target_steps:
+            raise MemoryGuardError(
+                "Memory guard [adaptive batch]: initial_steps cannot exceed target_steps "
+                f"({self.initial_steps} > {self.target_steps})"
+            )
+
 
 @dataclass
 class BatchDecision:
@@ -1072,6 +1127,11 @@ def adaptive_batch_config_from_run(
     target_steps: int,
 ) -> AdaptiveBatchConfig:
     """Create an AdaptiveBatchConfig targeting the given frame/step counts."""
+    for name, value in (("target_frames", target_frames), ("target_steps", target_steps)):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise MemoryGuardError(
+                f"Memory guard [adaptive batch]: {name} must be a positive integer, got {value!r}"
+            )
     return AdaptiveBatchConfig(
         initial_frames=min(ADAPTIVE_INITIAL_FRAMES, target_frames),
         initial_steps=min(ADAPTIVE_INITIAL_STEPS, target_steps),

@@ -64,6 +64,36 @@ def test_steps_benchmark_rejects_invalid_positive_integer_env(tmp_path, monkeypa
         spec.loader.exec_module(module)
 
 
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "message"),
+    [
+        (
+            "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES",
+            str(1024 * 1024 + 1),
+            "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES must be no greater than 1048576",
+        ),
+        (
+            "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES",
+            str(1024 * 1024 + 1),
+            "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES must be no greater than 1048576",
+        ),
+    ],
+)
+def test_steps_benchmark_rejects_unbounded_child_io_env(tmp_path, monkeypatch, env_name, env_value, message):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_unbounded_child_io_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv(env_name, env_value)
+
+    with pytest.raises(Exception, match=message):
+        spec.loader.exec_module(module)
+
+
 def test_steps_benchmark_rejects_invalid_step_values(tmp_path, monkeypatch):
     import importlib.util
 
