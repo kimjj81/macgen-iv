@@ -74,6 +74,7 @@ COMPILE_CHOICES = ("off", "on")
 DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
 MAX_SUMMARY_FIELD_CHARS = 256
+MAX_SUMMARY_NUMERIC_FIELD_CHARS = 64
 MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
 MAX_CLI_FRAMES = MAX_RUN_FRAMES
 MAX_CLI_STEPS = MAX_RUN_STEPS
@@ -1630,6 +1631,10 @@ def _finite_record_seconds(record: dict) -> float:
     raw = record["seconds"]
     if type(raw) not in {int, float, str}:
         return 0.0
+    if isinstance(raw, str):
+        raw = _bounded_summary_numeric_text(raw)
+        if raw is None:
+            return 0.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -1645,6 +1650,10 @@ def _non_negative_record_int(record: dict, key: str) -> int | None:
         return None
     if type(value) not in {int, str}:
         return None
+    if isinstance(value, str):
+        value = _bounded_summary_numeric_text(value)
+        if value is None:
+            return None
     try:
         converted = int(value)
     except (TypeError, ValueError):
@@ -1652,6 +1661,13 @@ def _non_negative_record_int(record: dict, key: str) -> int | None:
     if converted < 0:
         return None
     return converted
+
+
+def _bounded_summary_numeric_text(value: str) -> str | None:
+    text = value.strip()
+    if len(text) > MAX_SUMMARY_NUMERIC_FIELD_CHARS:
+        return None
+    return text
 
 
 def _summary_text(value: object) -> str:

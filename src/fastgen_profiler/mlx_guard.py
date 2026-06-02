@@ -536,6 +536,7 @@ def configure_mlx_resource_limits(
     }
 
     _probe_mlx_import(label)
+    _validate_pre_run_snapshot(system_snapshot(), label=f"{label} post-probe")
 
     try:
         import mlx.core as mx

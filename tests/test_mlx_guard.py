@@ -869,6 +869,42 @@ class TestConfigureMlxResourceLimits:
         assert calls["cache"] == int(0.5 * 1024 ** 3)
         assert calls["wired"] == 10 * 1024 ** 3
 
+    def test_probe_memory_drop_blocks_before_parent_mlx_import(self, monkeypatch):
+        sys.modules.pop("mlx.core", None)
+        snapshots = [
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.2,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=1 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.2,
+                swap_files=0,
+                free_fraction=None,
+            ),
+        ]
+        probe_calls: list[str] = []
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.system_snapshot", lambda: snapshots.pop(0))
+        monkeypatch.setattr("fastgen_profiler.mlx_guard._probe_mlx_import", lambda label: probe_calls.append(label))
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"mlx", "mlx.core"}:
+                raise AssertionError("parent mlx import must wait for post-probe memory check")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(MemoryGuardError, match="post-probe.*only"):
+            configure_mlx_resource_limits(label="probe-drop")
+
+        assert probe_calls == ["probe-drop"]
+
     def test_limit_set_failure_runs_cleanup_after_mlx_import(self, monkeypatch):
         mx = _install_fake_mlx(monkeypatch)
         monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")

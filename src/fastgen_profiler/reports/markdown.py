@@ -8,6 +8,7 @@ from typing import Any
 
 
 MAX_REPORT_FIELD_CHARS = 256
+MAX_REPORT_NUMERIC_FIELD_CHARS = 64
 MAX_REPORT_RECORDS = 10_000
 MAX_REPORT_RUNS = 1_000
 
@@ -220,6 +221,10 @@ def _finite_seconds(record: dict[str, Any]) -> float:
     raw = record["seconds"]
     if type(raw) not in {int, float, str}:
         return 0.0
+    if isinstance(raw, str):
+        raw = _bounded_numeric_text(raw)
+        if raw is None:
+            return 0.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -232,6 +237,10 @@ def _finite_seconds(record: dict[str, Any]) -> float:
 def _non_negative_int(value: Any) -> int | None:
     if type(value) not in {int, str}:
         return None
+    if isinstance(value, str):
+        value = _bounded_numeric_text(value)
+        if value is None:
+            return None
     try:
         converted = int(value)
     except (TypeError, ValueError):
@@ -239,6 +248,13 @@ def _non_negative_int(value: Any) -> int | None:
     if converted < 0:
         return None
     return converted
+
+
+def _bounded_numeric_text(value: str) -> str | None:
+    text = value.strip()
+    if len(text) > MAX_REPORT_NUMERIC_FIELD_CHARS:
+        return None
+    return text
 
 
 def _report_text(value: Any) -> str:

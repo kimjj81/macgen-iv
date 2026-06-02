@@ -570,6 +570,29 @@ def test_markdown_report_does_not_coerce_unknown_numeric_values():
     assert "UnsafeNumeric" not in report
 
 
+def test_markdown_report_ignores_oversized_numeric_strings():
+    huge_numeric = "1" * 10_000
+    records = [
+        {
+            "run_id": "oversized-numeric",
+            "preset": "manual",
+            "variant_label": "manual",
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "total",
+            "seconds": huge_numeric,
+            "peak_memory": huge_numeric,
+            "error": None,
+        }
+    ]
+
+    report = render_markdown_report(records)
+
+    assert "0.000000" in report
+    assert "unavailable" in report
+    assert huge_numeric not in report
+
+
 def test_markdown_report_rejects_too_many_runs_before_rendering_sections():
     from fastgen_profiler.reports.markdown import MAX_REPORT_RUNS
 

@@ -513,6 +513,29 @@ def test_profile_summary_does_not_coerce_unknown_numeric_values():
     assert recommendation == "no phase timing data available"
 
 
+def test_profile_summary_ignores_oversized_numeric_strings():
+    huge_numeric = "1" * 10_000
+    records = [
+        {
+            "run_id": "oversized-numeric",
+            "preset": "smoke",
+            "variant_label": "manual",
+            "phase": "total",
+            "seconds": huge_numeric,
+            "peak_memory": huge_numeric,
+            "error": None,
+        }
+    ]
+
+    rows = cli_module._profile_summary_rows(records)
+    recommendation = cli_module._profile_recommendation(records)
+
+    assert rows[0]["total"] == 0.0
+    assert rows[0]["peak_memory"] == "unavailable"
+    assert huge_numeric not in recommendation
+    assert recommendation == "no phase timing data available"
+
+
 def test_profile_command_runs_full_wan_suite_and_writes_comparison_report(tmp_path, capsys):
     results_dir = tmp_path / "profiles"
 
