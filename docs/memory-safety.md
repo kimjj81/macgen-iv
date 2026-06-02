@@ -78,6 +78,9 @@ unknown pressure or swap telemetry, or critical pressure, must abort before
 large file reads, tensor materialization, NumPy conversion, or video encoding.
 Tensor-derived preflights must use real integer shapes and must rerun after
 shape-expanding operations such as latent upsampling.
+CLI-provided dimensions, frame counts, FPS, and step counts must be bounded
+before constructing manual or preset run specs, so scaffold/stub paths cannot
+create unbounded phase loops or JSONL output outside MLX-specific guards.
 Result/report readers must also remain bounded. JSONL benchmark result files
 may be appended over many runs, so report generation must reject input files
 above a fixed byte limit and stop before accumulating an excessive number of

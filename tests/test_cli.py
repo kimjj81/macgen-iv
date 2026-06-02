@@ -172,6 +172,93 @@ def test_cli_run_appends_jsonl_records(tmp_path):
     assert len(_read_jsonl(jsonl_path)) == first_count * 2
 
 
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--width", "4097", "width must be no greater than 4096"),
+        ("--height", "4097", "height must be no greater than 4096"),
+        ("--frames", "258", "frames must be no greater than 257"),
+        ("--steps", "513", "steps must be no greater than 512"),
+        ("--fps", "241", "fps must be no greater than 240"),
+    ],
+)
+def test_cli_rejects_manual_run_dimensions_above_memory_safe_caps(
+    tmp_path,
+    option,
+    value,
+    message,
+):
+    args = [
+        "run",
+        "--model",
+        "wan2.2",
+        "--backend",
+        "stub",
+        "--prompt",
+        "oversized",
+        "--negative-prompt",
+        "",
+        "--seed",
+        "2",
+        "--width",
+        "128",
+        "--height",
+        "128",
+        "--frames",
+        "2",
+        "--fps",
+        "2",
+        "--steps",
+        "1",
+        "--guidance",
+        "1.0",
+        "--quant",
+        "none",
+        "--cache",
+        "none",
+        "--compile",
+        "off",
+        "--output-dir",
+        str(tmp_path / "outputs"),
+        "--result-jsonl",
+        str(tmp_path / "benchmarks.jsonl"),
+        "--no-save-video",
+        option,
+        value,
+    ]
+
+    with pytest.raises(SystemExit, match=message):
+        main(args)
+
+
+def test_cli_rejects_preset_override_above_memory_safe_caps(tmp_path):
+    with pytest.raises(SystemExit, match="steps must be no greater than 512"):
+        main(
+            [
+                "run",
+                "--preset",
+                "cache-experiment",
+                "--model",
+                "wan2.2",
+                "--backend",
+                "stub",
+                "--prompt",
+                "oversized preset",
+                "--negative-prompt",
+                "",
+                "--seed",
+                "2",
+                "--steps",
+                "513",
+                "--output-dir",
+                str(tmp_path / "outputs"),
+                "--result-jsonl",
+                str(tmp_path / "benchmarks.jsonl"),
+                "--no-save-video",
+            ]
+        )
+
+
 def test_report_command_produces_markdown_from_jsonl(tmp_path):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     report_path = tmp_path / "report.md"

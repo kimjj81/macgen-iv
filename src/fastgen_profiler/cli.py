@@ -69,6 +69,10 @@ COMPILE_CHOICES = ("off", "on")
 DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
 MAX_SUMMARY_FIELD_CHARS = 256
+MAX_CLI_DIMENSION = 4096
+MAX_CLI_FRAMES = 257
+MAX_CLI_STEPS = 512
+MAX_CLI_FPS = 240
 
 app = typer.Typer(
     help="Profile MLX video generation experiments and write benchmark JSONL.",
@@ -810,6 +814,7 @@ def _complete_run_options(
     quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
     cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
     compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+    _validate_positive_capped_int(fps, "fps", MAX_CLI_FPS)
 
     if interactive:
         model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
@@ -893,6 +898,7 @@ def _complete_profile_options(
     quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
     cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
     compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+    _validate_positive_capped_int(fps, "fps", MAX_CLI_FPS)
 
     if interactive:
         model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
@@ -1076,16 +1082,18 @@ def _manual_run(options: RunOptions) -> PresetRun:
             "Manual run is missing required fields "
             f"({', '.join(missing)}). Pass --preset or provide all manual run fields."
         )
-    return PresetRun(
-        width=options.width,
-        height=options.height,
-        frames=options.frames,
-        steps=options.steps,
-        guidance=options.guidance,
-        quant=options.quant,
-        cache=options.cache,
-        compile=options.compile,
-        save_video=options.save_video,
+    return _validate_preset_run(
+        PresetRun(
+            width=options.width,
+            height=options.height,
+            frames=options.frames,
+            steps=options.steps,
+            guidance=options.guidance,
+            quant=options.quant,
+            cache=options.cache,
+            compile=options.compile,
+            save_video=options.save_video,
+        )
     )
 
 
@@ -1096,7 +1104,7 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
     save_video = options.save_video
 
     if preset == "smoke":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=384,
                 height=384,
@@ -1108,10 +1116,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 compile="off",
                 save_video=False if save_video is None else save_video,
             )
-        ]
+        ])
 
     if preset == "small-baseline":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=512,
                 height=512,
@@ -1125,10 +1133,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
             )
             for variant_guidance in (1.0, guidance)
             for variant_quant in ("none", "q8p")
-        ]
+        ])
 
     if preset == "quality-threshold":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=720,
                 height=480,
@@ -1141,12 +1149,12 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=True if save_video is None else save_video,
             )
             for steps in (16, 24, 32, 40)
-        ]
+        ])
 
     if preset == "stress":
         if options.model != "wan2.2":
             raise typer.BadParameter("The stress preset is currently limited to --model wan2.2.")
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=1280,
                 height=720,
@@ -1159,10 +1167,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for steps in (24, 40)
-        ]
+        ])
 
     if preset == "cache-experiment":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=options.width or 512,
                 height=options.height or 512,
@@ -1175,10 +1183,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for variant_cache in ("none", "prompt", "feature", "all")
-        ]
+        ])
 
     if preset == "compile-experiment":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=options.width or 512,
                 height=options.height or 512,
@@ -1191,9 +1199,30 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for variant_compile in ("off", "on")
-        ]
+        ])
 
     raise typer.BadParameter(f"Unknown preset: {preset}")
+
+
+def _validate_preset_runs(runs: list[PresetRun]) -> list[PresetRun]:
+    for run in runs:
+        _validate_preset_run(run)
+    return runs
+
+
+def _validate_preset_run(run: PresetRun) -> PresetRun:
+    _validate_positive_capped_int(run.width, "width", MAX_CLI_DIMENSION)
+    _validate_positive_capped_int(run.height, "height", MAX_CLI_DIMENSION)
+    _validate_positive_capped_int(run.frames, "frames", MAX_CLI_FRAMES)
+    _validate_positive_capped_int(run.steps, "steps", MAX_CLI_STEPS)
+    return run
+
+
+def _validate_positive_capped_int(value: object, name: str, max_value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise typer.BadParameter(f"{name} must be a positive integer")
+    if value > max_value:
+        raise typer.BadParameter(f"{name} must be no greater than {max_value}")
 
 
 def _profile_run_specs(options: RunOptions) -> tuple[list[ProfileRunSpec], list[ProfileRunSpec]]:

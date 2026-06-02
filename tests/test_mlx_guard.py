@@ -300,6 +300,67 @@ class TestCheckMemoryGuard:
         with pytest.raises(MemoryGuardError, match="memory pressure"):
             check_memory_guard(label="blind-pressure")
 
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            SystemSnapshot(
+                free_bytes=-1,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=0,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=129 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=-0.1,
+                swap_files=0,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=1.1,
+                swap_files=0,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=-1,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=1.1,
+            ),
+        ],
+    )
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_fails_closed_on_invalid_memory_telemetry(self, mock_snap, snapshot):
+        mock_snap.return_value = snapshot
+
+        with pytest.raises(MemoryGuardError, match="invalid memory telemetry"):
+            check_memory_guard(label="invalid-telemetry")
+
 
 # ---------------------------------------------------------------------------
 # Runtime watchdog (Guard 3)
@@ -558,6 +619,75 @@ class TestCheckRuntimeMemory:
 
         with pytest.raises(RuntimeMemoryAbort, match="cannot read MLX allocator memory"):
             check_runtime_memory(label="mlx-invalid-counter")
+
+        mock_cleanup.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            SystemSnapshot(
+                free_bytes=-1,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=0,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=129 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=None,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=-0.1,
+                swap_files=0,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=1.1,
+                swap_files=0,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=-1,
+                free_fraction=80 / 128,
+            ),
+            SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.1,
+                swap_files=0,
+                free_fraction=1.1,
+            ),
+        ],
+    )
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_runtime_fails_closed_on_invalid_memory_telemetry(
+        self,
+        mock_snap,
+        mock_cleanup,
+        snapshot,
+    ):
+        mock_snap.return_value = snapshot
+
+        with pytest.raises(RuntimeMemoryAbort, match="invalid memory telemetry"):
+            check_runtime_memory(label="runtime-invalid-telemetry")
 
         mock_cleanup.assert_called_once()
 
@@ -1168,6 +1298,22 @@ class TestAllocationBudget:
         )
 
         with pytest.raises(RuntimeMemoryAbort, match="pressure at 95"):
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        mock_cleanup.assert_called_once()
+
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_host_allocation_fails_closed_on_invalid_memory_telemetry(self, mock_snap, mock_cleanup):
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=129 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.2,
+            swap_files=0,
+            free_fraction=None,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="invalid memory telemetry"):
             check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
 
         mock_cleanup.assert_called_once()

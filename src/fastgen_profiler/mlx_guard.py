@@ -225,7 +225,11 @@ def system_snapshot() -> SystemSnapshot:
         swap = None
 
     free_frac = None
-    if free is not None and total is not None and total > 0:
+    if (
+        _is_non_negative_int(free)
+        and _is_positive_int(total)
+        and free <= total
+    ):
         free_frac = free / total
 
     return SystemSnapshot(
@@ -234,6 +238,58 @@ def system_snapshot() -> SystemSnapshot:
         pressure=pressure,
         swap_files=swap,
         free_fraction=free_frac,
+    )
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_unit_interval_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= value <= 1
+    )
+
+
+def _invalid_system_snapshot_reasons(snap: SystemSnapshot) -> list[str]:
+    """Return impossible memory telemetry values that must fail closed."""
+    reasons: list[str] = []
+
+    if snap.free_bytes is not None and not _is_non_negative_int(snap.free_bytes):
+        reasons.append(f"free_bytes must be a non-negative integer, got {snap.free_bytes!r}")
+    if snap.total_bytes is not None and not _is_positive_int(snap.total_bytes):
+        reasons.append(f"total_bytes must be a positive integer, got {snap.total_bytes!r}")
+    if (
+        _is_non_negative_int(snap.free_bytes)
+        and _is_positive_int(snap.total_bytes)
+        and snap.free_bytes > snap.total_bytes
+    ):
+        reasons.append(
+            f"free_bytes cannot exceed total_bytes ({snap.free_bytes!r} > {snap.total_bytes!r})"
+        )
+    if snap.pressure is not None and not _is_unit_interval_number(snap.pressure):
+        reasons.append(f"pressure must be a finite number in [0, 1], got {snap.pressure!r}")
+    if snap.swap_files is not None and not _is_non_negative_int(snap.swap_files):
+        reasons.append(f"swap_files must be a non-negative integer, got {snap.swap_files!r}")
+    if snap.free_fraction is not None and not _is_unit_interval_number(snap.free_fraction):
+        reasons.append(
+            f"free_fraction must be a finite number in [0, 1], got {snap.free_fraction!r}"
+        )
+
+    return reasons
+
+
+def _invalid_system_snapshot_message(label: str, reasons: list[str]) -> str:
+    return (
+        f"Memory guard [{label}]: invalid memory telemetry: "
+        + "; ".join(reasons)
     )
 
 
@@ -340,6 +396,10 @@ def _validate_pre_run_snapshot(
     max_swap_files: int = MAX_SWAP_FILES,
 ) -> None:
     """Fail closed before any MLX import or allocator probe."""
+    invalid_reasons = _invalid_system_snapshot_reasons(snap)
+    if invalid_reasons:
+        raise MemoryGuardError(_invalid_system_snapshot_message(label, invalid_reasons))
+
     if sys.platform == "darwin" and snap.free_bytes is None:
         raise MemoryGuardError(
             f"Memory guard [{label}]: cannot read vm_stat free memory. "
@@ -539,6 +599,9 @@ def check_memory_guard(
     Returns status dict. Raises MemoryGuardError if insufficient.
     """
     snap = system_snapshot()
+    invalid_reasons = _invalid_system_snapshot_reasons(snap)
+    if invalid_reasons:
+        raise MemoryGuardError(_invalid_system_snapshot_message(label, invalid_reasons))
 
     status: dict[str, object] = {
         "label": label,
@@ -610,6 +673,11 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
             f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
             "during MLX/Metal run. Aborting because runtime memory state is unknown."
         ) from exc
+
+    invalid_reasons = _invalid_system_snapshot_reasons(snap)
+    if invalid_reasons:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(_invalid_system_snapshot_message(label, invalid_reasons))
 
     if sys.platform == "darwin" and snap.free_bytes is None:
         mlx_cleanup()
@@ -695,6 +763,11 @@ def check_host_allocation_headroom(
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
     snap = system_snapshot()
     required_with_reserve = required_bytes + reserve_bytes
+    invalid_reasons = _invalid_system_snapshot_reasons(snap)
+    if invalid_reasons:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(_invalid_system_snapshot_message(label, invalid_reasons))
+
     if sys.platform == "darwin" and snap.swap_files is None:
         mlx_cleanup()
         raise RuntimeMemoryAbort(
