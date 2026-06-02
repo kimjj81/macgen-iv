@@ -265,14 +265,18 @@ def test_steps_benchmark_child_timeout_records_abort(tmp_path, monkeypatch):
         json.loads(line)
         for line in module.RESULTS_JSONL.read_text(encoding="utf-8").splitlines()
     ]
+    child_log = module.OUTPUT_BASE / "steps_1.child.log"
+    child_result = module.OUTPUT_BASE / "steps_1.child.json"
     assert records == [
         {
             "steps": 1,
             "error": "child process timed out after 7s",
             "aborted": True,
-            "log_path": str(module.OUTPUT_BASE / "steps_1.child.log"),
+            "log_path": str(child_log),
         }
     ]
+    assert not child_log.exists()
+    assert not child_result.exists()
 
 
 def test_steps_benchmark_child_abort_records_cleanup_status(tmp_path, monkeypatch):
@@ -1151,12 +1155,15 @@ def test_steps_benchmark_does_not_read_stale_child_result(tmp_path, monkeypatch)
     with patch.object(module.subprocess, "run", side_effect=fake_run):
         result = module.run_step_in_child(1)
 
+    child_log = module.OUTPUT_BASE / "steps_1.child.log"
     assert result == {
         "steps": 1,
         "error": "child process exited 7 without a result record",
         "aborted": True,
-        "log_path": str(module.OUTPUT_BASE / "steps_1.child.log"),
+        "log_path": str(child_log),
     }
+    assert not child_log.exists()
+    assert not stale.exists()
 
 
 def test_steps_benchmark_rejects_malformed_child_result_as_abort(tmp_path, monkeypatch):
@@ -1185,6 +1192,8 @@ def test_steps_benchmark_rejects_malformed_child_result_as_abort(tmp_path, monke
     assert result["aborted"] is True
     assert result["error"].startswith("child result file is not valid JSONL:")
     assert result["log_path"] == str(module.OUTPUT_BASE / "steps_1.child.log")
+    assert not child_result.exists()
+    assert not (module.OUTPUT_BASE / "steps_1.child.log").exists()
 
 
 def test_steps_benchmark_streams_child_result_without_read_text(tmp_path, monkeypatch):
@@ -1249,6 +1258,8 @@ def test_steps_benchmark_rejects_oversized_child_result(tmp_path, monkeypatch):
         "aborted": True,
         "log_path": str(module.OUTPUT_BASE / "steps_1.child.log"),
     }
+    assert not child_result.exists()
+    assert not (module.OUTPUT_BASE / "steps_1.child.log").exists()
 
 
 def test_steps_benchmark_rejects_unbounded_parent_result_stream(tmp_path, monkeypatch):

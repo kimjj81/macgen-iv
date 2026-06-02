@@ -446,17 +446,19 @@ def run_step_in_child(steps: int) -> dict:
             )
     except subprocess.TimeoutExpired:
         _print_child_log_tail(child_log)
-        return {
+        record = {
             "steps": steps,
             "error": f"child process timed out after {CHILD_TIMEOUT_SECONDS}s",
             "aborted": True,
             "log_path": str(child_log),
         }
+        _cleanup_child_artifacts(child_result, child_log)
+        return record
     _print_child_log_tail(child_log)
     if child_result.exists():
         result_size = child_result.stat().st_size
         if result_size > CHILD_RESULT_MAX_BYTES:
-            return {
+            record = {
                 "steps": steps,
                 "error": (
                     f"child result file is {result_size} bytes, "
@@ -465,31 +467,47 @@ def run_step_in_child(steps: int) -> dict:
                 "aborted": True,
                 "log_path": str(child_log),
             }
+            _cleanup_child_artifacts(child_result, child_log)
+            return record
         try:
             record = _read_last_child_result(child_result)
         except json.JSONDecodeError as exc:
-            return {
+            record = {
                 "steps": steps,
                 "error": f"child result file is not valid JSONL: {exc}",
                 "aborted": True,
                 "log_path": str(child_log),
             }
+            _cleanup_child_artifacts(child_result, child_log)
+            return record
         if record is None:
-            return {
+            record = {
                 "steps": steps,
                 "error": "child result file did not contain a result record",
                 "aborted": True,
                 "log_path": str(child_log),
             }
+            _cleanup_child_artifacts(child_result, child_log)
+            return record
         record = _bound_steps_result(record)
         record.setdefault("log_path", str(child_log))
         return record
-    return {
+    record = {
         "steps": steps,
         "error": f"child process exited {result.returncode} without a result record",
         "aborted": True,
         "log_path": str(child_log),
     }
+    _cleanup_child_artifacts(child_result, child_log)
+    return record
+
+
+def _cleanup_child_artifacts(*paths: Path) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _print_child_log_tail(path: Path) -> None:
