@@ -460,6 +460,50 @@ def test_steps_benchmark_run_single_preflights_png_frame_save(tmp_path, monkeypa
     assert len(saved) == 2
 
 
+def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeypatch):
+    import importlib.util
+    import fastgen_profiler.backends.ltx23_mlx_adapter as ltx_adapter
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_eval_abort_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    spec.loader.exec_module(module)
+
+    class FakePipeline:
+        def load_model(self):
+            return {}
+
+        def prepare_prompt(self, *, prompt, negative_prompt):
+            return {"prompt": prompt, "negative_prompt": negative_prompt}
+
+        def encode_text(self, prepared):
+            return object()
+
+    cleanup_calls: list[str] = []
+    fake_mx = types.SimpleNamespace(
+        eval=lambda *args: (_ for _ in ()).throw(RuntimeError("metal sync failed")),
+    )
+
+    monkeypatch.setattr(module, "check_memory_guard", lambda label: {"free_gb": 100})
+    monkeypatch.setattr(module, "check_run_allocation_budget", lambda **kwargs: {"shape_floor_gb": 1})
+    monkeypatch.setattr(module, "check_runtime_memory", lambda label: None)
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: cleanup_calls.append("cleanup") or {"freed_gb": 0})
+    monkeypatch.setattr(module, "increment_run_counter", lambda: None)
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(ltx_adapter, "create_ltx23_pipeline", lambda **kwargs: FakePipeline())
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="MLX eval failed"):
+        module.run_single(1)
+
+    assert cleanup_calls == ["cleanup"]
+
+
 def test_steps_benchmark_rejects_unexpected_video_shape_before_png_save(tmp_path, monkeypatch):
     import importlib.util
     import numpy as np

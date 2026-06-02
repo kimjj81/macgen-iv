@@ -67,6 +67,17 @@ def _positive_int_value(name: str, raw: str) -> int:
     return value
 
 
+def _eval_mlx(mx, target, *, label: str) -> None:
+    try:
+        mx.eval(target)
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: MLX eval failed; "
+            "aborting because Metal runtime state may be unsafe."
+        ) from exc
+
+
 MODEL_PATH = Path(os.environ.get(
     "FASTGEN_STEPS_MODEL_PATH",
     str(REPO_ROOT / "artifacts" / "models" / "LTX-2.3-distilled-mlx"),
@@ -183,25 +194,25 @@ def run_single(steps: int):
     t0 = time.perf_counter()
     prepared = pipe.prepare_prompt(prompt=PROMPT, negative_prompt=NEGATIVE_PROMPT)
     context = pipe.encode_text(prepared)
-    mx.eval(context)
+    _eval_mlx(mx, context, label=f"{label} text_encode")
     t1 = time.perf_counter()
     result["text_encode_s"] = round(t1 - t0, 2)
     print(f"  text_encode: {result['text_encode_s']}s")
 
     # Init latents
     latents = pipe.init_latents(seed=SEED, width=WIDTH, height=HEIGHT, frames=FRAMES)
-    mx.eval(latents)
+    _eval_mlx(mx, latents, label=f"{label} latent_init")
 
     # Denoise
     denoise_times = []
     for i in range(steps):
         check_runtime_memory(label=f"{label} denoise {i+1}/{steps} before")
-        mx.eval(latents)
+        _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} input")
         t0 = time.perf_counter()
         latents = pipe.denoise_step(
             latents, step_index=i, steps=steps, guidance=1.0, cache="none"
         )
-        mx.eval(latents)
+        _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} output")
         check_runtime_memory(label=f"{label} denoise {i+1}/{steps} after")
         t1 = time.perf_counter()
         step_s = t1 - t0
@@ -215,7 +226,7 @@ def run_single(steps: int):
     result["denoise_max_s"] = round(max(denoise_times), 2)
 
     # VAE decode
-    mx.eval(latents)
+    _eval_mlx(mx, latents, label=f"{label} vae_decode input")
     check_runtime_memory(label=f"{label} vae_decode before")
     t0 = time.perf_counter()
     video = pipe.decode(latents)
