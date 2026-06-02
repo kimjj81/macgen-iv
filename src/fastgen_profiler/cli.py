@@ -41,7 +41,7 @@ from .models import (
     resolve_model_candidate,
 )
 from .profiler import Profiler
-from .reports.markdown import render_markdown_report
+from .reports.markdown import MAX_REPORT_RECORDS, render_markdown_report
 
 
 PRESET_CHOICES = (
@@ -376,6 +376,20 @@ def run_command(options: RunOptions) -> int:
 
 def _records_have_errors(records: list[MeasurementRecord]) -> bool:
     return any(record.error for record in records)
+
+
+def _profile_record_limit_error(records: object, *, current_count: int) -> str | None:
+    try:
+        record_count = len(records)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    total_count = current_count + record_count
+    if total_count <= MAX_REPORT_RECORDS:
+        return None
+    return (
+        f"profile record limit exceeded: {total_count} records > {MAX_REPORT_RECORDS}; "
+        "refusing to materialize profile report"
+    )
 
 
 def _backend_is_scaffold_only(backend: object) -> bool:
@@ -724,11 +738,29 @@ def profile_command(options: RunOptions) -> int:
                 guard_context=cleanup_status,
             )
 
+        limit_error = _profile_record_limit_error(records, current_count=len(all_records))
+        if limit_error is not None:
+            memory_guard_failed = True
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=limit_error,
+                candidate=candidate,
+                guard_context=cleanup_status,
+            )
+
         append_jsonl(options.result_jsonl, records)
         all_records.extend(record.to_dict() for record in records)
         if options.backend == "mlx" and _records_have_errors(records):
             memory_guard_failed = True
-        if memory_aborted or guard_failed or (options.backend == "mlx" and _records_have_errors(records)):
+        if (
+            limit_error is not None
+            or memory_aborted
+            or guard_failed
+            or (options.backend == "mlx" and _records_have_errors(records))
+        ):
             break
 
     for spec in skipped_specs:

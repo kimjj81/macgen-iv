@@ -1013,28 +1013,21 @@ class LTX23MLXPipeline:
             raise
 
     def _check_tensor_shape_allocation(self, tensor: Any, phase: str, *, multiplier: int = 4) -> None:
-        shape = getattr(tensor, "shape", None)
-        if shape is None:
-            _raise_runtime_abort(
-                f"LTX2.3 {phase} has no shape; refusing to continue without allocation preflight"
-            )
-        try:
-            dimensions = tuple(shape)
-        except TypeError:
-            _raise_runtime_abort(
-                f"LTX2.3 {phase} shape {shape!r} is not a finite integer shape; "
-                "refusing to continue without allocation preflight"
-            )
+        dimensions = _bounded_shape_tuple(
+            tensor,
+            expected_rank=len(self._expected_latent_shape()),
+            label=f"LTX2.3 {phase}",
+        )
         for dim in dimensions:
             if not isinstance(dim, int) or isinstance(dim, bool):
                 _raise_runtime_abort(
-                    f"LTX2.3 {phase} shape {shape!r} is not a finite integer shape; "
+                    f"LTX2.3 {phase} shape {dimensions!r} is not a finite integer shape; "
                     "refusing to continue without allocation preflight"
                 )
         elements = math.prod(dimensions)
         if elements <= 0:
             _raise_runtime_abort(
-                f"LTX2.3 {phase} shape {shape!r} has no positive elements; refusing to continue"
+                f"LTX2.3 {phase} shape {dimensions!r} has no positive elements; refusing to continue"
             )
         self._check_host_allocation(elements * 4 * multiplier, phase)
 

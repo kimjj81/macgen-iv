@@ -821,6 +821,57 @@ def test_mlx_profile_cleanup_failure_fails_closed_after_success(tmp_path, monkey
     }
 
 
+def test_profile_command_fails_closed_before_materializing_oversized_backend_records(tmp_path, monkeypatch):
+    from fastgen_profiler.reports.markdown import MAX_REPORT_RECORDS
+
+    jsonl_path = tmp_path / "profile.jsonl"
+
+    class OversizedRecords:
+        def __len__(self):
+            return MAX_REPORT_RECORDS + 1
+
+        def __iter__(self):
+            raise AssertionError("oversized profile records must be rejected before iteration")
+
+    monkeypatch.setattr(cli_module.Profiler, "run", lambda self, config: OversizedRecords())
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "stub",
+            "--prompt",
+            "oversized records",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--fps",
+            "4",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--result-jsonl",
+            str(jsonl_path),
+            "--results-dir",
+            str(tmp_path / "profiles"),
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert len(records) == 1
+    assert records[0]["phase"] == "total"
+    assert "profile record limit exceeded" in records[0]["error"]
+
+
 def test_mlx_inner_memory_guard_error_records_cleanup_status(tmp_path, monkeypatch):
     from fastgen_profiler.mlx_guard import MemoryGuardError
 

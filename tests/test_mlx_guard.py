@@ -5681,7 +5681,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeMemoryAbort, match="not a finite integer shape"):
+        with pytest.raises(RuntimeMemoryAbort, match="non-integer dimension"):
             pipe.decode(FakeLatents())
 
         assert cleanup_calls == ["cleanup"]
@@ -5831,8 +5831,31 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             steps=1,
         )
 
-        with pytest.raises(RuntimeMemoryAbort, match="not a finite integer shape"):
+        with pytest.raises(RuntimeMemoryAbort, match="non-integer dimension"):
             pipe._check_tensor_shape_allocation(FakeTensor(), "coerced tensor")
+
+    def test_ltx23_tensor_allocation_rejects_unbounded_shape_metadata(self, tmp_path):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class Shape:
+            def __iter__(self):
+                yield from (1, 128, 4, 64, 64, 1)
+                raise AssertionError("tensor allocation preflight must stop at expected rank")
+
+        class FakeTensor:
+            shape = Shape()
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="shape rank exceeds"):
+            pipe._check_tensor_shape_allocation(FakeTensor(), "unbounded tensor")
 
     def test_wan22_decode_preflights_output_tensor_before_vae_forward(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
