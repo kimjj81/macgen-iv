@@ -567,70 +567,129 @@ def test_mlx_profile_guard_error_preserves_model_candidate(tmp_path, monkeypatch
     assert records[0]["model_path"] == str(model_path.resolve())
 
 
-def test_mlx_scaffold_writes_failed_schema_records(tmp_path):
+def test_mlx_scaffold_runs_cli_memory_guard_before_failed_schema_records(tmp_path, monkeypatch):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     model_path = tmp_path / "wan-model"
     model_path.mkdir()
-    with (
-        patch.object(
-            cli_module,
-            "_mlx_pre_run_guard",
-            side_effect=AssertionError("scaffold must not configure MLX runtime"),
-        ),
-        patch.object(
-            cli_module,
-            "_mlx_post_run_cleanup",
-            side_effect=AssertionError("scaffold must not run MLX cleanup"),
-        ),
-    ):
-        exit_code = main(
-            [
-                "run",
-                "--model",
-                "wan2.2",
-                "--backend",
-                "mlx",
-                "--model-path",
-                str(model_path),
-                "--prompt",
-                "mlx scaffold",
-                "--negative-prompt",
-                "",
-                "--seed",
-                "3",
-                "--width",
-                "256",
-                "--height",
-                "256",
-                "--frames",
-                "4",
-                "--fps",
-                "4",
-                "--steps",
-                "1",
-                "--guidance",
-                "1.0",
-                "--quant",
-                "none",
-                "--cache",
-                "none",
-                "--compile",
-                "off",
-                "--output-dir",
-                str(tmp_path / "outputs"),
-                "--result-jsonl",
-                str(jsonl_path),
-                "--no-save-video",
-            ]
-        )
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: calls.append(f"pre:{label}") or None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: calls.append(f"post:{label}") or {"cleanup": {"mlx_cache_cleared": False, "mlx_cleanup_error": None}},
+    )
 
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx scaffold",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
 
     assert exit_code == 1
+    assert calls == ["pre:manual", "post:manual"]
     records = _read_jsonl(jsonl_path)
     assert records
     assert any(record["error"] for record in records)
     assert all(record["backend"] == "mlx" for record in records)
     assert all(record["model_path"] == str(model_path.resolve()) for record in records)
+
+
+def test_mlx_scaffold_cannot_bypass_pre_run_memory_guard(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_pre_run_guard",
+        lambda label, config=None: "Memory guard blocked run: scaffold blocked",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: (_ for _ in ()).throw(AssertionError("blocked pre-run must not run cleanup")),
+    )
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx guarded scaffold",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    records = _read_jsonl(jsonl_path)
+    assert exit_code == 1
+    assert len(records) == 1
+    assert records[0]["error"] == "Memory guard blocked run: scaffold blocked"
 
 
 def test_mlx_run_applies_pre_run_memory_guard(tmp_path, monkeypatch):

@@ -94,6 +94,46 @@ def test_profiler_records_required_fields_and_phases():
     assert all("python_version" in record["machine"] for record in serialized)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("width", 4097, "width must be no greater than 4096"),
+        ("height", 4097, "height must be no greater than 4096"),
+        ("frames", 258, "frames must be no greater than 257"),
+        ("fps", 241, "fps must be no greater than 240"),
+        ("steps", 513, "steps must be no greater than 512"),
+    ],
+)
+def test_profiler_rejects_direct_run_config_outside_safe_bounds(field, value, message):
+    config = RunConfig(
+        model="ltx2.3",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="schema test",
+        negative_prompt="",
+        seed=1,
+        width=512,
+        height=288,
+        frames=8,
+        fps=8,
+        steps=2,
+        guidance=3.5,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=Path("unused"),
+        result_jsonl=Path("unused.jsonl"),
+        save_video=False,
+        dry_run=True,
+    )
+    setattr(config, field, value)
+
+    with pytest.raises(ValueError, match=message):
+        Profiler(create_backend("stub")).run(config)
+
+
 def test_machine_metadata_does_not_import_mlx(monkeypatch):
     sys.modules.pop("mlx", None)
     sys.modules.pop("mlx.core", None)

@@ -35,6 +35,10 @@ DEFAULT_JSONL_READ_MAX_RECORDS = 100_000
 MAX_METRIC_TEXT_FIELD_CHARS = 2_048
 MAX_METRIC_COLLECTION_ITEMS = 256
 MAX_MACHINE_METADATA_OUTPUT_BYTES = 16 * 1024
+MAX_RUN_DIMENSION = 4096
+MAX_RUN_FRAMES = 257
+MAX_RUN_FPS = 240
+MAX_RUN_STEPS = 512
 
 
 @dataclass(slots=True)
@@ -186,6 +190,24 @@ def make_record(
         variant_label=config.variant_label,
         machine=machine,
     )
+
+
+def validate_run_config_safety(config: RunConfig) -> None:
+    """Validate core run bounds before any backend can allocate or emit records."""
+    _validate_positive_capped_int(config.width, "width", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(config.height, "height", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(config.frames, "frames", MAX_RUN_FRAMES)
+    _validate_positive_capped_int(config.fps, "fps", MAX_RUN_FPS)
+    _validate_positive_capped_int(config.steps, "steps", MAX_RUN_STEPS)
+
+
+def _validate_positive_capped_int(value: object, name: str, max_value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if value > max_value:
+        raise ValueError(f"{name} must be no greater than {max_value}")
 
 
 def append_jsonl(

@@ -19,6 +19,10 @@ import typer
 
 from .backends import create_backend
 from .metrics import (
+    MAX_RUN_DIMENSION,
+    MAX_RUN_FPS,
+    MAX_RUN_FRAMES,
+    MAX_RUN_STEPS,
     MeasurementRecord,
     RunConfig,
     append_jsonl,
@@ -69,10 +73,10 @@ COMPILE_CHOICES = ("off", "on")
 DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
 MAX_SUMMARY_FIELD_CHARS = 256
-MAX_CLI_DIMENSION = 4096
-MAX_CLI_FRAMES = 257
-MAX_CLI_STEPS = 512
-MAX_CLI_FPS = 240
+MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
+MAX_CLI_FRAMES = MAX_RUN_FRAMES
+MAX_CLI_STEPS = MAX_RUN_STEPS
+MAX_CLI_FPS = MAX_RUN_FPS
 
 app = typer.Typer(
     help="Profile MLX video generation experiments and write benchmark JSONL.",
@@ -300,7 +304,7 @@ def run_command(options: RunOptions) -> int:
         return 1
 
     backend = create_backend(options.backend)
-    mlx_runtime_required = options.backend == "mlx" and not _backend_is_scaffold_only(backend)
+    mlx_runtime_required = _mlx_runtime_required(options, backend)
     for preset_run in preset_runs:
         config = RunConfig(
             model=options.model,
@@ -426,6 +430,16 @@ def _profile_record_limit_message(total_count: int) -> str:
 
 def _backend_is_scaffold_only(backend: object) -> bool:
     return bool(getattr(backend, "scaffold_only", False))
+
+
+def _mlx_runtime_required(options: RunOptions, backend: object) -> bool:
+    if options.backend != "mlx":
+        return False
+    # The generic MLX scaffold does not import Metal today, but selecting the
+    # MLX backend is still an opt-in heavy-runtime intent. Keep the CLI guard
+    # invariant independent from adapter implementation details so replacing
+    # the scaffold with a real adapter cannot silently bypass memory gates.
+    return True
 
 
 def _memory_guard_error_type() -> type[Exception]:
@@ -678,7 +692,7 @@ def profile_command(options: RunOptions) -> int:
         return 1
 
     backend = create_backend(options.backend)
-    mlx_runtime_required = options.backend == "mlx" and not _backend_is_scaffold_only(backend)
+    mlx_runtime_required = _mlx_runtime_required(options, backend)
     all_records = []
 
     # Guard state: tracks memory headroom across specs.
