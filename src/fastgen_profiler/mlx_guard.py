@@ -144,7 +144,14 @@ def swap_file_count() -> int | None:
     try:
         if not swap_dir.is_dir():
             return 0
-        return sum(1 for f in swap_dir.iterdir() if f.name.startswith("swapfile"))
+        count = 0
+        for entry in swap_dir.iterdir():
+            if not entry.name.startswith("swapfile"):
+                continue
+            count += 1
+            if count > MAX_SWAP_FILES:
+                return count
+        return count
     except OSError:
         return None
 

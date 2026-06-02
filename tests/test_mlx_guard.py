@@ -166,6 +166,36 @@ class TestVmStatParsing:
 
 
 class TestSystemTelemetryFailures:
+    def test_swap_file_count_stops_after_guard_threshold(self, monkeypatch):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        consumed = 0
+
+        class FakeEntry:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeSwapDir:
+            def __init__(self, path):
+                self.path = path
+
+            def is_dir(self):
+                return True
+
+            def iterdir(self):
+                nonlocal consumed
+                for index in range(mlx_guard.MAX_SWAP_FILES + 100):
+                    consumed += 1
+                    if consumed > mlx_guard.MAX_SWAP_FILES + 1:
+                        raise AssertionError("swap scan must stop after threshold is exceeded")
+                    yield FakeEntry(f"swapfile{index}")
+
+        monkeypatch.setattr(mlx_guard.sys, "platform", "darwin")
+        monkeypatch.setattr(mlx_guard, "Path", FakeSwapDir)
+
+        assert mlx_guard.swap_file_count() == mlx_guard.MAX_SWAP_FILES + 1
+        assert consumed == mlx_guard.MAX_SWAP_FILES + 1
+
     def test_system_snapshot_tolerates_telemetry_helper_exceptions(self, monkeypatch):
         import fastgen_profiler.mlx_guard as mlx_guard
 
