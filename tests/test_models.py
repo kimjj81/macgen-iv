@@ -39,6 +39,22 @@ def test_model_discovery_does_not_materialize_entire_directory_list():
     assert offenders == []
 
 
+def test_model_discovery_does_not_use_os_walk_file_list_materialization():
+    source = Path("src/fastgen_profiler/models.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[int] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "walk":
+            continue
+        if isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+            offenders.append(node.lineno)
+
+    assert offenders == []
+
+
 def test_model_discovery_rejects_excessive_directory_traversal(tmp_path, monkeypatch):
     root = tmp_path / "models"
     root.mkdir()

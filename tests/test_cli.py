@@ -450,6 +450,34 @@ def test_profile_summary_bounds_text_and_ignores_non_finite_metrics():
     assert "nan" not in recommendation.lower()
 
 
+def test_profile_summary_summarizes_unknown_values_without_repr_or_str():
+    class UnsafeValue:
+        def __repr__(self):
+            raise AssertionError("profile summary must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("profile summary must not call str on unknown values")
+
+    records = [
+        {
+            "run_id": UnsafeValue(),
+            "preset": "smoke",
+            "variant_label": UnsafeValue(),
+            "phase": UnsafeValue(),
+            "seconds": 0.0,
+            "peak_memory": None,
+            "error": UnsafeValue(),
+        }
+    ]
+
+    rows = cli_module._profile_summary_rows(records)
+    recommendation = cli_module._profile_recommendation(records)
+
+    assert "UnsafeValue" in rows[0]["variant"]
+    assert rows[0]["status"] == "failed"
+    assert "UnsafeValue" in recommendation
+
+
 def test_profile_command_runs_full_wan_suite_and_writes_comparison_report(tmp_path, capsys):
     results_dir = tmp_path / "profiles"
 

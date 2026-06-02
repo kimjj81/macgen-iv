@@ -95,7 +95,7 @@ def _validate_report_size(records: list[dict[str, Any]]) -> None:
         )
     run_ids: set[str] = set()
     for record in records:
-        run_ids.add(str(record["run_id"]))
+        run_ids.add(_report_text(record["run_id"]))
         if len(run_ids) > MAX_REPORT_RUNS:
             raise ValueError(
                 f"report run limit exceeded: more than {MAX_REPORT_RUNS} runs"
@@ -105,7 +105,7 @@ def _validate_report_size(records: list[dict[str, Any]]) -> None:
 def _group_by_run(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        grouped[str(record["run_id"])].append(record)
+        grouped[_report_text(record["run_id"])].append(record)
     return dict(grouped)
 
 
@@ -237,7 +237,16 @@ def _non_negative_int(value: Any) -> int | None:
 
 
 def _report_text(value: Any) -> str:
-    text = str(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
+    text = _safe_report_text(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
     if len(text) <= MAX_REPORT_FIELD_CHARS:
         return text
     return f"{text[: MAX_REPORT_FIELD_CHARS - 12]}...<truncated>"
+
+
+def _safe_report_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"

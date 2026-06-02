@@ -464,6 +464,33 @@ def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():
     assert "x" * 300 not in report
 
 
+def test_markdown_report_summarizes_unknown_values_without_repr_or_str():
+    class UnsafeValue:
+        def __repr__(self):
+            raise AssertionError("markdown report must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("markdown report must not call str on unknown values")
+
+    records = [
+        {
+            "run_id": UnsafeValue(),
+            "preset": "manual",
+            "variant_label": "manual",
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": UnsafeValue(),
+            "seconds": 0.0,
+            "peak_memory": None,
+            "error": UnsafeValue(),
+        }
+    ]
+
+    report = render_markdown_report(records)
+
+    assert "UnsafeValue" in report
+
+
 def test_markdown_report_rejects_too_many_runs_before_rendering_sections():
     from fastgen_profiler.reports.markdown import MAX_REPORT_RUNS
 

@@ -308,11 +308,23 @@ def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
 
 
 def _walk_dirs(root: Path) -> Iterable[Path]:
-    for current, dir_names, _file_names in os.walk(root):
-        dir_names[:] = [
-            name for name in dir_names if name not in SKIP_DIR_NAMES and not name.startswith(".")
-        ]
-        yield Path(current)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        yield current
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if entry.name in SKIP_DIR_NAMES or entry.name.startswith("."):
+                        continue
+                    stack.append(Path(entry.path))
+        except OSError:
+            continue
 
 
 def _check_candidate_limit(

@@ -1539,11 +1539,11 @@ def _print_profile_summary(records: list[dict], jsonl_path: Path, report_path: P
 def _profile_summary_rows(records: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = {}
     for record in records:
-        grouped.setdefault(str(record["run_id"]), []).append(record)
+        grouped.setdefault(_summary_text(record["run_id"]), []).append(record)
     rows = []
     for run_records in grouped.values():
         first = run_records[0]
-        errors = [str(record["error"]) for record in run_records if record.get("error")]
+        errors = [_summary_text(record["error"]) for record in run_records if record.get("error")]
         status = "skipped" if any(error.startswith("skipped:") for error in errors) else ("failed" if errors else "ok")
         rows.append(
             {
@@ -1563,7 +1563,7 @@ def _profile_recommendation(records: list[dict]) -> str:
     errors = [
         _summary_text(record["error"])
         for record in records
-        if record.get("error") and not str(record["error"]).startswith("skipped:")
+        if record.get("error") and not _summary_text(record["error"]).startswith("skipped:")
     ]
     if errors:
         return f"fix failed run first: {errors[0]}"
@@ -1644,10 +1644,19 @@ def _non_negative_record_int(record: dict, key: str) -> int | None:
 
 
 def _summary_text(value: object) -> str:
-    text = str(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
+    text = _safe_summary_text(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
     if len(text) <= MAX_SUMMARY_FIELD_CHARS:
         return text
     return f"{text[: MAX_SUMMARY_FIELD_CHARS - 12]}...<truncated>"
+
+
+def _safe_summary_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
