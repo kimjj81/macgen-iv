@@ -132,6 +132,27 @@ Supported import sources are `drawthings`, `comfyui`, `huggingface`, `lmstudio`,
 Import replaces the existing `FASTGEN_MODEL_DIRS` value with Wan2.2/LTX2.3 generation model candidate directories found in the current scan. LM Studio/Ollama LLM-only and GGUF-only directories are skipped. If no generation model candidates are found, the command exits with an error and does not change `.env`.
 Draw Things discovery checks both `~/Library/Containers/Draw Things/Data` and `~/Library/Containers/com.liuliu.draw-things/Data`, including their `Documents/Models` subdirectories.
 
+Convert local checkpoints to the MLX directory layout expected by benchmarks:
+
+```bash
+uv run fastgen-profile models convert \
+  --model wan2.2 \
+  --source /path/to/Wan2.2-TI2V-5B \
+  --output-dir /path/to/Wan2.2-TI2V-5B-MLX \
+  --quantize \
+  --bits 4 \
+  --register
+
+uv run fastgen-profile models convert \
+  --model ltx2.3 \
+  --source /path/to/ltx_2.3_22b_distilled_1.1_q6p.safetensors \
+  --output-dir /path/to/LTX-2.3-MLX \
+  --variant distilled \
+  --register
+```
+
+`--register` adds the converted output directory to `.env` so later benchmark commands can discover it. Use `--dry-run` to print the conversion command without running it.
+
 Use a specific model:
 
 ```bash

@@ -13,6 +13,7 @@ Architecture and workflow details live in:
 - `docs/architecture.md`
 - `docs/profiling.md`
 - `docs/benchmark-matrix.md`
+- `docs/memory-safety.md`
 - `docs/optimization-roadmap.md`
 - `docs/model-targets.md`
 
@@ -31,6 +32,11 @@ Architecture and workflow details live in:
 - `mx.compile` must only be introduced after a baseline profiler exists.
 - Attention, cache, and sampler optimization comes after bottleneck confirmation.
 - Custom Metal kernels are out of scope until profiling proves a specific kernel bottleneck.
+- MLX/Metal model runs must pass the memory guard before importing MLX in the
+  running process.
+- Heavy model benchmarks must be opt-in, isolated in child processes where
+  practical, and safe by default when invoked directly.
+- Do not enable automatic model/text-encoder downloads by default.
 
 ## Verification
 

@@ -4,31 +4,54 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import importlib.util
+import logging
+import math
+import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Annotated
 import uuid
 
+logger = logging.getLogger("fastgen_profiler.cli")
+
 import click
 import typer
 
 from .backends import create_backend
-from .metrics import RunConfig, append_jsonl, make_record, machine_metadata, new_run_id, read_jsonl, utc_timestamp
+from .metrics import (
+    MAX_RUN_DIMENSION,
+    MAX_RUN_FPS,
+    MAX_RUN_FRAMES,
+    MAX_RUN_STEPS,
+    MeasurementRecord,
+    RunConfig,
+    append_jsonl,
+    make_record,
+    machine_metadata,
+    new_run_id,
+    read_jsonl,
+    utc_timestamp,
+)
 from .models import (
     IMPORT_SOURCES,
     ModelCandidate,
+    bounded_model_dir_paths,
     candidate_to_dict,
     discover_generation_model_dirs,
     direct_model_candidate,
     discover_import_dirs,
     discover_models,
+    merge_model_dirs_into_env,
+    model_dirs_env_value,
     model_dirs_from_sources,
     replace_model_dirs_in_env,
     resolve_model_candidate,
 )
 from .profiler import Profiler
-from .reports.markdown import render_markdown_report
+from .reports.markdown import MAX_REPORT_RECORDS, render_markdown_report
 
 
 PRESET_CHOICES = (
@@ -55,6 +78,16 @@ COMPILE_CHOICES = ("off", "on")
 
 DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
+MAX_SUMMARY_FIELD_CHARS = 256
+MAX_SUMMARY_NUMERIC_FIELD_CHARS = 64
+MAX_INTERACTIVE_CHOICE_CHARS = 64
+MAX_INTERACTIVE_TEXT_CHARS = 8_192
+MAX_MODEL_LIST_CANDIDATES = 1_024
+MAX_CLI_DIMENSION = MAX_RUN_DIMENSION
+MAX_CLI_FRAMES = MAX_RUN_FRAMES
+MAX_CLI_STEPS = MAX_RUN_STEPS
+MAX_CLI_FPS = MAX_RUN_FPS
+ALLOW_PARENT_MLX_ENV = "FASTGEN_CLI_ALLOW_PARENT_MLX"
 
 app = typer.Typer(
     help="Profile MLX video generation experiments and write benchmark JSONL.",
@@ -242,7 +275,7 @@ def report(
     input: Annotated[Path, typer.Option("--input")] = ...,
     output: Annotated[Path, typer.Option("--output")] = ...,
 ) -> None:
-    records = read_jsonl(input)
+    records = read_jsonl(input, max_records=MAX_REPORT_RECORDS)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_markdown_report(records), encoding="utf-8")
 
@@ -273,6 +306,38 @@ def models_import(
     )
 
 
+@models_app.command("convert")
+def models_convert(
+    model: Annotated[str, typer.Option("--model", case_sensitive=False)] = ...,
+    source: Annotated[str, typer.Option("--source")] = ...,
+    output_dir: Annotated[Path, typer.Option("--output-dir")] = ...,
+    env_file: Annotated[Path, typer.Option("--env-file")] = Path(".env"),
+    variant: Annotated[str, typer.Option("--variant", case_sensitive=False)] = "distilled",
+    dtype: Annotated[str, typer.Option("--dtype", case_sensitive=False)] = "bfloat16",
+    quantize: Annotated[bool, typer.Option("--quantize")] = False,
+    bits: Annotated[int, typer.Option("--bits")] = 4,
+    group_size: Annotated[int, typer.Option("--group-size")] = 64,
+    register: Annotated[bool, typer.Option("--register")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    model = _validate_choice(model, MODEL_CHOICES, "model")
+    raise typer.Exit(
+        _convert_model_dir(
+            model=model,
+            source=source,
+            output_dir=output_dir,
+            env_file=env_file,
+            variant=variant,
+            dtype=dtype,
+            quantize=quantize,
+            bits=bits,
+            group_size=group_size,
+            register=register,
+            dry_run=dry_run,
+        )
+    )
+
+
 def run_command(options: RunOptions) -> int:
     preset = options.preset or _select_preset_if_needed(options)
     preset_runs = _preset_runs(preset, options) if preset else [_manual_run(options)]
@@ -282,6 +347,7 @@ def run_command(options: RunOptions) -> int:
         return 1
 
     backend = create_backend(options.backend)
+    mlx_runtime_required = _mlx_runtime_required(options, backend)
     for preset_run in preset_runs:
         config = RunConfig(
             model=options.model,
@@ -308,9 +374,406 @@ def run_command(options: RunOptions) -> int:
             preset=preset,
             variant_label=_variant_label(preset, preset_run) if preset else "manual",
         )
-        records = Profiler(backend).run(config)
+        if mlx_runtime_required:
+            guard_error = _mlx_pre_run_guard(config.variant_label or "manual", config=config)
+            if guard_error is not None:
+                records = _error_records_for_config(config, error=guard_error)
+                append_jsonl(options.result_jsonl, records)
+                return 1
+            parent_error = _mlx_parent_process_execution_error(options, backend)
+            if parent_error is not None:
+                records = _error_records_for_config(config, error=parent_error)
+                append_jsonl(options.result_jsonl, records)
+                return 1
+
+        memory_aborted = False
+        guard_failed = False
+        runtime_abort_error = None
+        guard_error = None
+        cleanup_status = None
+        try:
+            records = Profiler(backend).run(config)
+        except _memory_guard_error_type() as exc:
+            guard_failed = True
+            guard_error = f"Memory guard blocked run: {_safe_exception_text(exc)}"
+            _release_exception_for_cleanup(exc)
+        except _runtime_memory_abort_type() as exc:
+            memory_aborted = True
+            runtime_abort_error = f"Runtime memory abort: {_safe_exception_text(exc)}"
+            _release_exception_for_cleanup(exc)
+        finally:
+            if mlx_runtime_required:
+                cleanup_status = _mlx_post_run_cleanup(config.variant_label or "manual")
+        cleanup_error = _mlx_cleanup_failure_error(cleanup_status) if mlx_runtime_required else None
+        if cleanup_error is not None and not guard_failed and not memory_aborted:
+            guard_failed = True
+            guard_error = cleanup_error
+        if guard_failed:
+            records = _error_records_for_config(
+                config,
+                error=guard_error or "Memory guard blocked run",
+                guard_context=cleanup_status,
+            )
+        if memory_aborted:
+            records = _error_records_for_config(
+                config,
+                error=runtime_abort_error or "Runtime memory abort",
+                guard_context=cleanup_status,
+            )
+        records, limit_error = _bounded_profile_records(records, current_count=0)
+        if limit_error is not None:
+            guard_failed = True
+            records = _error_records_for_config(
+                config,
+                error=limit_error,
+                guard_context=cleanup_status,
+            )
         append_jsonl(options.result_jsonl, records)
+        if options.backend == "mlx" and _records_have_errors(records):
+            return 1
+        if limit_error is not None or memory_aborted or guard_failed:
+            return 1
     return 0
+
+
+def _records_have_errors(records: list[MeasurementRecord]) -> bool:
+    return any(record.error for record in records)
+
+
+def _bounded_profile_records(
+    records: object,
+    *,
+    current_count: int,
+) -> tuple[list[MeasurementRecord], str | None]:
+    limit_error = _profile_record_limit_error(records, current_count=current_count)
+    if limit_error is not None:
+        return [], limit_error
+    if isinstance(records, list):
+        return records, None
+
+    remaining = MAX_REPORT_RECORDS - current_count
+    bounded: list[MeasurementRecord] = []
+    for index, record in enumerate(records):  # type: ignore[operator]
+        if index >= remaining:
+            return [], _profile_record_limit_message(current_count + index + 1)
+        bounded.append(record)
+    return bounded, None
+
+
+def _profile_record_limit_error(records: object, *, current_count: int) -> str | None:
+    try:
+        record_count = len(records)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    total_count = current_count + record_count
+    if total_count <= MAX_REPORT_RECORDS:
+        return None
+    return _profile_record_limit_message(total_count)
+
+
+def _profile_record_limit_message(total_count: int) -> str:
+    return (
+        f"profile record limit exceeded: {total_count} records > {MAX_REPORT_RECORDS}; "
+        "refusing to materialize profile report"
+    )
+
+
+def _extend_profile_report_records(
+    all_records: list[dict[str, object]],
+    records: list[MeasurementRecord],
+) -> str | None:
+    for record in records:
+        total_count = len(all_records) + 1
+        if total_count > MAX_REPORT_RECORDS:
+            return _profile_record_limit_message(total_count)
+        all_records.append(record.to_dict())
+    return None
+
+
+def _backend_is_scaffold_only(backend: object) -> bool:
+    return bool(getattr(backend, "scaffold_only", False))
+
+
+def _mlx_runtime_required(options: RunOptions, backend: object) -> bool:
+    if options.backend != "mlx":
+        return False
+    # The generic MLX scaffold does not import Metal today, but selecting the
+    # MLX backend is still an opt-in heavy-runtime intent. Keep the CLI guard
+    # invariant independent from adapter implementation details so replacing
+    # the scaffold with a real adapter cannot silently bypass memory gates.
+    return True
+
+
+def _mlx_parent_process_execution_error(options: RunOptions, backend: object) -> str | None:
+    if options.backend != "mlx" or _backend_is_scaffold_only(backend):
+        return None
+    if os.environ.get(ALLOW_PARENT_MLX_ENV) == "1":
+        return None
+    return (
+        f"Memory guard blocked run: real MLX backend execution in the CLI parent process "
+        f"requires {ALLOW_PARENT_MLX_ENV}=1 until a CLI child-process orchestrator is available. "
+        "This prevents Metal state from accumulating in the long-lived parent process."
+    )
+
+
+def _memory_guard_error_type() -> type[Exception]:
+    try:
+        from fastgen_profiler.mlx_guard import MemoryGuardError
+    except ImportError:
+        return RuntimeError
+    return MemoryGuardError
+
+
+def _runtime_memory_abort_type() -> type[Exception]:
+    try:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+    except ImportError:
+        return RuntimeError
+    return RuntimeMemoryAbort
+
+
+def _error_records_for_config(
+    config: RunConfig,
+    *,
+    error: str,
+    guard_context: dict[str, object] | None = None,
+) -> list:
+    machine = machine_metadata()
+    if guard_context is not None:
+        machine["mlx_guard_cleanup"] = guard_context.get("cleanup")
+    return [
+        make_record(
+            config,
+            run_id=new_run_id(),
+            timestamp_utc=utc_timestamp(),
+            machine=machine,
+            phase="total",
+            seconds=0.0,
+            error=error,
+        )
+    ]
+
+
+def _mlx_pre_run_guard(label: str, *, config: RunConfig | None = None) -> str | None:
+    try:
+        from fastgen_profiler.mlx_guard import (
+            MAX_CONSECUTIVE_RUNS,
+            check_run_allocation_budget,
+            check_text_prompt_budget,
+            inter_run_system_recovery,
+            run_counter,
+            should_restart_process,
+        )
+
+        if should_restart_process():
+            return (
+                f"skipped: process restart required after {run_counter()} "
+                "consecutive MLX runs to prevent Metal resource accumulation."
+            )
+
+        budget = None
+        if config is not None:
+            budget = check_run_allocation_budget(
+                width=config.width,
+                height=config.height,
+                frames=config.frames,
+                guidance=config.guidance,
+                label=label,
+            )
+            check_text_prompt_budget(
+                prompt=config.prompt,
+                negative_prompt=config.negative_prompt,
+                label=label,
+            )
+        recovery = inter_run_system_recovery(label=label)
+        typer.echo(
+            f"[guard] pre-run '{label}': "
+            f"free={recovery.get('free_gb', '?')}GB "
+            f"freed={recovery.get('freed_gb', '?')}GB "
+            f"shape_floor={(budget or {}).get('shape_floor_gb', '?')}GB "
+            f"run={recovery.get('run_number', '?')}/{MAX_CONSECUTIVE_RUNS}"
+        )
+    except ImportError as exc:
+        return (
+            "Memory guard blocked run: mlx_guard unavailable before MLX run: "
+            f"{_safe_exception_text(exc)}"
+        )
+    except Exception as exc:
+        return f"Memory guard blocked run: {_safe_exception_text(exc)}"
+    return None
+
+
+def _mlx_post_run_cleanup(label: str) -> dict[str, object] | None:
+    try:
+        from fastgen_profiler.mlx_guard import increment_run_counter, mlx_cleanup, system_snapshot
+
+        try:
+            cleanup = mlx_cleanup()
+        except Exception as exc:
+            cleanup_error = _safe_exception_text(exc)
+            _detach_exception(exc)
+            typer.echo(
+                f"[guard] post-run '{label}': cleanup failed: {cleanup_error}"
+            )
+            return {
+                "snapshot": None,
+                "cleanup": {
+                    "mlx_loaded": None,
+                    "mlx_cache_cleared": False,
+                    "mlx_cleanup_error": f"mlx_cleanup raised: {cleanup_error}",
+                },
+                "run_number": None,
+            }
+        try:
+            completed_runs = increment_run_counter()
+        except Exception as exc:
+            counter_error = _safe_exception_text(exc)
+            _detach_exception(exc)
+            typer.echo(
+                f"[guard] post-run '{label}': cleanup completed but run counter failed: "
+                f"{counter_error}"
+            )
+            cleanup_status = dict(cleanup) if isinstance(cleanup, dict) else cleanup
+            if isinstance(cleanup_status, dict):
+                if not cleanup_status.get("mlx_cleanup_error"):
+                    cleanup_status["mlx_cleanup_error"] = (
+                        f"mlx cleanup bookkeeping failed: {counter_error}"
+                    )
+            return {"snapshot": None, "cleanup": cleanup_status, "run_number": None}
+        try:
+            snap = system_snapshot()
+        except Exception:
+            snap = None
+        freed_gb = cleanup.get("freed_gb", "?") if isinstance(cleanup, dict) else "?"
+        typer.echo(
+            f"[guard] post-run '{label}': run={completed_runs} "
+            f"{snap.summary() if snap is not None else 'free=?GB'} "
+            f"freed={freed_gb}GB"
+        )
+        return {"snapshot": snap, "cleanup": cleanup, "run_number": completed_runs}
+    except ImportError as exc:
+        typer.echo(
+            f"[guard] post-run '{label}': cleanup unavailable because mlx_guard could not be imported: "
+            f"{_safe_exception_text(exc)}"
+        )
+        return {
+            "snapshot": None,
+            "cleanup": {
+                "mlx_loaded": None,
+                "mlx_cache_cleared": False,
+                "mlx_cleanup_error": "mlx_guard unavailable after MLX run",
+            },
+            "run_number": None,
+        }
+
+
+def _mlx_cleanup_failure_error(cleanup_status: dict[str, object] | None) -> str | None:
+    if cleanup_status is None:
+        return "Memory guard blocked run: MLX post-run cleanup did not return status"
+    cleanup = cleanup_status.get("cleanup")
+    if not isinstance(cleanup, dict):
+        return "Memory guard blocked run: MLX post-run cleanup returned invalid status"
+    cleanup_error = cleanup.get("mlx_cleanup_error")
+    if cleanup_error:
+        return f"Memory guard blocked run: MLX post-run cleanup failed: {cleanup_error}"
+    if cleanup.get("mlx_loaded") is True and cleanup.get("mlx_cache_cleared") is False:
+        return "Memory guard blocked run: MLX post-run cleanup did not clear loaded MLX cache"
+    return None
+
+
+def _adaptive_adjust_spec(
+    spec: ProfileRunSpec,
+    adaptive_state: dict[str, object],
+    *,
+    backend_name: str,
+) -> ProfileRunSpec:
+    """Adjust a ProfileRunSpec based on memory headroom from previous runs.
+
+    If the previous post-run snapshot showed low memory headroom, shrink
+    frames/steps to prevent kernel watchdog timeout. If headroom is good,
+    leave the spec unchanged (or grow toward original target).
+
+    This only applies to the mlx backend — stub runs are never adjusted.
+    """
+    if backend_name != "mlx":
+        return spec
+
+    last_snap = adaptive_state.get("last_snapshot")
+    if last_snap is None:
+        # No previous snapshot — first spec runs at original size.
+        return spec
+
+    from fastgen_profiler.mlx_guard import SystemSnapshot
+
+    if not isinstance(last_snap, SystemSnapshot):
+        return spec
+
+    # Compute headroom: free_fraction if available, else inverse of pressure.
+    headroom: float | None = None
+    if last_snap.free_fraction is not None:
+        headroom = last_snap.free_fraction
+    elif last_snap.pressure is not None:
+        headroom = 1.0 - last_snap.pressure
+
+    if headroom is None:
+        return spec
+
+    original_frames = spec.run.frames
+    original_steps = spec.run.steps
+
+    # Thresholds
+    SHRINK_BELOW = 0.15  # <15% free → halve frames/steps
+    GROW_ABOVE = 0.35    # >35% free → grow toward original if we shrunk before
+
+    shrunk_specs: set = adaptive_state.get("shrunk_specs", set())  # type: ignore[assignment]
+
+    if headroom < SHRINK_BELOW:
+        # Danger zone: cut frames and steps in half (minimum 4 frames, 2 steps).
+        new_frames = max(4, original_frames // 2)
+        new_steps = max(2, original_steps // 2)
+        shrunk_specs.add(spec.variant_label)
+        typer.echo(
+            f"[adaptive] low headroom ({headroom * 100:.0f}%): "
+            f"shrinking {spec.variant_label} "
+            f"{original_frames}f/{original_steps}s -> {new_frames}f/{new_steps}s"
+        )
+    elif headroom > GROW_ABOVE and spec.variant_label in shrunk_specs:
+        # Recovered: restore original size.
+        new_frames = original_frames
+        new_steps = original_steps
+        shrunk_specs.discard(spec.variant_label)
+        typer.echo(
+            f"[adaptive] good headroom ({headroom * 100:.0f}%): "
+            f"restoring {spec.variant_label} to {new_frames}f/{new_steps}s"
+        )
+    elif headroom < 0.25 and spec.variant_label not in shrunk_specs:
+        # Moderate pressure: reduce by 25%.
+        new_frames = max(4, int(original_frames * 0.75))
+        new_steps = max(2, int(original_steps * 0.75))
+        shrunk_specs.add(spec.variant_label)
+        typer.echo(
+            f"[adaptive] moderate pressure ({headroom * 100:.0f}%): "
+            f"reducing {spec.variant_label} "
+            f"{original_frames}f/{original_steps}s -> {new_frames}f/{new_steps}s"
+        )
+    else:
+        return spec
+
+    return ProfileRunSpec(
+        preset=spec.preset,
+        variant_label=spec.variant_label,
+        run=PresetRun(
+            width=spec.run.width,
+            height=spec.run.height,
+            frames=new_frames,
+            steps=new_steps,
+            guidance=spec.run.guidance,
+            quant=spec.run.quant,
+            cache=spec.run.cache,
+            compile=spec.run.compile,
+            save_video=spec.run.save_video,
+        ),
+    )
 
 
 def profile_command(options: RunOptions) -> int:
@@ -332,25 +795,158 @@ def profile_command(options: RunOptions) -> int:
                 ),
             )
             append_jsonl(options.result_jsonl, records)
-            all_records.extend(record.to_dict() for record in records)
+            limit_error = _extend_profile_report_records(all_records, records)
+            if limit_error is not None:
+                typer.echo(f"[guard] report limit blocked: {limit_error}")
+                break
         report_path = options.result_jsonl.with_suffix(".md")
         report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
         _print_profile_summary(all_records, options.result_jsonl, report_path)
         return 1
 
     backend = create_backend(options.backend)
+    mlx_runtime_required = _mlx_runtime_required(options, backend)
     all_records = []
+
+    # Guard state: tracks memory headroom across specs.
+    adaptive_state: dict[str, object] = {
+        "last_snapshot": None,
+        "shrunk_specs": set(),
+    }
+    memory_guard_failed = False
+
     for spec in specs:
+        spec_label = spec.variant_label
+
+        # Guard 2: Adaptive batch sizing.
+        effective_spec = _adaptive_adjust_spec(
+            spec, adaptive_state, backend_name=options.backend,
+        )
+
         config = _profile_run_config(
             options=options,
             candidate=candidate,
             profile_id=profile_id,
             profile_name=profile_name,
-            spec=spec,
+            spec=effective_spec,
         )
-        records = Profiler(backend).run(config)
+
+        if mlx_runtime_required:
+            guard_error = _mlx_pre_run_guard(spec_label, config=config)
+            if guard_error is not None:
+                memory_guard_failed = True
+                typer.echo(f"[guard] pre-run '{spec_label}' blocked: {guard_error}")
+                records = _profile_error_records(
+                    options=options,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    spec=effective_spec,
+                    error=guard_error,
+                    candidate=candidate,
+                )
+                append_jsonl(options.result_jsonl, records)
+                limit_error = _extend_profile_report_records(all_records, records)
+                if limit_error is not None:
+                    typer.echo(f"[guard] report limit blocked: {limit_error}")
+                break
+            parent_error = _mlx_parent_process_execution_error(options, backend)
+            if parent_error is not None:
+                memory_guard_failed = True
+                records = _profile_error_records(
+                    options=options,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    spec=effective_spec,
+                    error=parent_error,
+                    candidate=candidate,
+                )
+                append_jsonl(options.result_jsonl, records)
+                limit_error = _extend_profile_report_records(all_records, records)
+                if limit_error is not None:
+                    typer.echo(f"[guard] report limit blocked: {limit_error}")
+                break
+
+        memory_aborted = False
+        guard_failed = False
+        runtime_abort_error = None
+        guard_error = None
+        cleanup_status = None
+        try:
+            records = Profiler(backend).run(config)
+        except _memory_guard_error_type() as exc:
+            guard_failed = True
+            memory_guard_failed = True
+            safe_error = _safe_exception_text(exc)
+            logger.warning(f"Memory guard failure for '{spec_label}': {safe_error}")
+            guard_error = f"Memory guard blocked run: {safe_error}"
+            _release_exception_for_cleanup(exc)
+        except _runtime_memory_abort_type() as exc:
+            memory_aborted = True
+            memory_guard_failed = True
+            safe_error = _safe_exception_text(exc)
+            logger.warning(f"Runtime memory abort for '{spec_label}': {safe_error}")
+            runtime_abort_error = f"Runtime memory abort: {safe_error}"
+            _release_exception_for_cleanup(exc)
+        finally:
+            if mlx_runtime_required:
+                cleanup_status = _mlx_post_run_cleanup(spec_label)
+                snap = cleanup_status.get("snapshot") if cleanup_status is not None else None
+                if snap is not None:
+                    adaptive_state["last_snapshot"] = snap
+        cleanup_error = _mlx_cleanup_failure_error(cleanup_status) if mlx_runtime_required else None
+        if cleanup_error is not None and not guard_failed and not memory_aborted:
+            guard_failed = True
+            memory_guard_failed = True
+            guard_error = cleanup_error
+        if guard_failed:
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=guard_error or "Memory guard blocked run",
+                candidate=candidate,
+                guard_context=cleanup_status,
+            )
+        if memory_aborted:
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=runtime_abort_error or "Runtime memory abort",
+                candidate=candidate,
+                guard_context=cleanup_status,
+            )
+
+        records, limit_error = _bounded_profile_records(records, current_count=len(all_records))
+        if limit_error is not None:
+            memory_guard_failed = True
+            records = _profile_error_records(
+                options=options,
+                profile_id=profile_id,
+                profile_name=profile_name,
+                spec=effective_spec,
+                error=limit_error,
+                candidate=candidate,
+                guard_context=cleanup_status,
+            )
+
         append_jsonl(options.result_jsonl, records)
-        all_records.extend(record.to_dict() for record in records)
+        report_limit_error = _extend_profile_report_records(all_records, records)
+        if report_limit_error is not None:
+            memory_guard_failed = True
+            typer.echo(f"[guard] report limit blocked: {report_limit_error}")
+            break
+        if options.backend == "mlx" and _records_have_errors(records):
+            memory_guard_failed = True
+        if (
+            limit_error is not None
+            or memory_aborted
+            or guard_failed
+            or (options.backend == "mlx" and _records_have_errors(records))
+        ):
+            break
 
     for spec in skipped_specs:
         records = _skipped_profile_records(
@@ -361,12 +957,16 @@ def profile_command(options: RunOptions) -> int:
             reason="skipped: stress preset is currently limited to wan2.2",
         )
         append_jsonl(options.result_jsonl, records)
-        all_records.extend(record.to_dict() for record in records)
+        limit_error = _extend_profile_report_records(all_records, records)
+        if limit_error is not None:
+            memory_guard_failed = True
+            typer.echo(f"[guard] report limit blocked: {limit_error}")
+            break
 
     report_path = options.result_jsonl.with_suffix(".md")
     report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
     _print_profile_summary(all_records, options.result_jsonl, report_path)
-    return 0
+    return 1 if memory_guard_failed else 0
 
 
 def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_file: Path) -> None:
@@ -374,6 +974,7 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
     models = (model,) if model else MODEL_CHOICES
     all_candidates = []
     seen_paths: set[str] = set()
+    truncated = False
     for target_model in models:
         roots = model_dirs_from_sources(
             model=target_model,
@@ -386,7 +987,12 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
             if key in seen_paths:
                 continue
             seen_paths.add(key)
+            if len(all_candidates) >= MAX_MODEL_LIST_CANDIDATES:
+                truncated = True
+                break
             all_candidates.append(candidate)
+        if truncated:
+            break
 
     if not all_candidates:
         target = model if model else "wan2.2/ltx2.3"
@@ -399,6 +1005,11 @@ def _print_model_candidates(*, model: str | None, model_dir: list[Path], env_fil
         typer.echo(
             f"{index}. {data['id']} "
             f"family={data['model_family_guess']} markers={markers} path={data['path']}"
+        )
+    if truncated:
+        typer.echo(
+            f"[guard] model list limited to {MAX_MODEL_LIST_CANDIDATES} candidates; "
+            "narrow --model or --model-dir"
         )
 
 
@@ -435,6 +1046,7 @@ def _complete_run_options(
     quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
     cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
     compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+    _validate_positive_capped_int(fps, "fps", MAX_CLI_FPS)
 
     if interactive:
         model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
@@ -518,6 +1130,7 @@ def _complete_profile_options(
     quant = _validate_optional_choice(quant, QUANT_CHOICES, "quant")
     cache = _validate_optional_choice(cache, CACHE_CHOICES, "cache")
     compile = _validate_optional_choice(compile, COMPILE_CHOICES, "compile")
+    _validate_positive_capped_int(fps, "fps", MAX_CLI_FPS)
 
     if interactive:
         model = model or _prompt_choice("Model", MODEL_CHOICES, "wan2.2")
@@ -572,6 +1185,7 @@ def _complete_profile_options(
 def main(argv: list[str] | None = None) -> int:
     command = typer.main.get_command(app)
     args = sys.argv[1:] if argv is None else argv
+    bad_parameter_message = None
     try:
         result = command.main(
             args=args,
@@ -579,9 +1193,12 @@ def main(argv: list[str] | None = None) -> int:
             standalone_mode=False,
         )
     except click.BadParameter as exc:
-        raise SystemExit(str(exc)) from exc
+        bad_parameter_message = _safe_exception_text(exc)
+        _detach_exception(exc)
     except click.exceptions.Exit as exc:
         return int(exc.exit_code or 0)
+    if bad_parameter_message is not None:
+        raise SystemExit(bad_parameter_message)
     return int(result or 0)
 
 
@@ -592,7 +1209,11 @@ def interactive_main_menu() -> int:
         typer.echo("2. List models")
         typer.echo("3. Import model directories")
         typer.echo("4. Exit")
-        choice = input("Command number: ").strip()
+        choice = _input_stripped(
+            "Command number: ",
+            label="command selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice == "1":
             return interactive_run_profile()
         if choice == "2":
@@ -614,7 +1235,11 @@ def interactive_import_model_dirs() -> int:
     for path in found:
         typer.echo(f"- {path}")
 
-    confirm = input("Save these directories to .env? [y/N]: ").strip().lower()
+    confirm = _input_stripped(
+        "Save these directories to .env? [y/N]: ",
+        label="import confirmation",
+        max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+    ).lower()
     if confirm not in {"y", "yes"}:
         typer.echo("Import cancelled.")
         return 0
@@ -674,7 +1299,11 @@ def _select_preset_if_needed(options: RunOptions) -> str | None:
     for index, preset in enumerate(PRESET_CHOICES, start=1):
         typer.echo(f"{index}. {preset}")
     while True:
-        choice = input("Preset number: ").strip()
+        choice = _input_stripped(
+            "Preset number: ",
+            label="preset selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice.isdigit():
             index = int(choice)
             if 1 <= index <= len(PRESET_CHOICES):
@@ -701,16 +1330,18 @@ def _manual_run(options: RunOptions) -> PresetRun:
             "Manual run is missing required fields "
             f"({', '.join(missing)}). Pass --preset or provide all manual run fields."
         )
-    return PresetRun(
-        width=options.width,
-        height=options.height,
-        frames=options.frames,
-        steps=options.steps,
-        guidance=options.guidance,
-        quant=options.quant,
-        cache=options.cache,
-        compile=options.compile,
-        save_video=options.save_video,
+    return _validate_preset_run(
+        PresetRun(
+            width=options.width,
+            height=options.height,
+            frames=options.frames,
+            steps=options.steps,
+            guidance=options.guidance,
+            quant=options.quant,
+            cache=options.cache,
+            compile=options.compile,
+            save_video=options.save_video,
+        )
     )
 
 
@@ -721,7 +1352,7 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
     save_video = options.save_video
 
     if preset == "smoke":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=384,
                 height=384,
@@ -733,10 +1364,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 compile="off",
                 save_video=False if save_video is None else save_video,
             )
-        ]
+        ])
 
     if preset == "small-baseline":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=512,
                 height=512,
@@ -750,10 +1381,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
             )
             for variant_guidance in (1.0, guidance)
             for variant_quant in ("none", "q8p")
-        ]
+        ])
 
     if preset == "quality-threshold":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=720,
                 height=480,
@@ -766,12 +1397,12 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=True if save_video is None else save_video,
             )
             for steps in (16, 24, 32, 40)
-        ]
+        ])
 
     if preset == "stress":
         if options.model != "wan2.2":
             raise typer.BadParameter("The stress preset is currently limited to --model wan2.2.")
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=1280,
                 height=720,
@@ -784,10 +1415,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for steps in (24, 40)
-        ]
+        ])
 
     if preset == "cache-experiment":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=options.width or 512,
                 height=options.height or 512,
@@ -800,10 +1431,10 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for variant_cache in ("none", "prompt", "feature", "all")
-        ]
+        ])
 
     if preset == "compile-experiment":
-        return [
+        return _validate_preset_runs([
             PresetRun(
                 width=options.width or 512,
                 height=options.height or 512,
@@ -816,9 +1447,30 @@ def _preset_runs(preset: str, options: RunOptions) -> list[PresetRun]:
                 save_video=False if save_video is None else save_video,
             )
             for variant_compile in ("off", "on")
-        ]
+        ])
 
     raise typer.BadParameter(f"Unknown preset: {preset}")
+
+
+def _validate_preset_runs(runs: list[PresetRun]) -> list[PresetRun]:
+    for run in runs:
+        _validate_preset_run(run)
+    return runs
+
+
+def _validate_preset_run(run: PresetRun) -> PresetRun:
+    _validate_positive_capped_int(run.width, "width", MAX_CLI_DIMENSION)
+    _validate_positive_capped_int(run.height, "height", MAX_CLI_DIMENSION)
+    _validate_positive_capped_int(run.frames, "frames", MAX_CLI_FRAMES)
+    _validate_positive_capped_int(run.steps, "steps", MAX_CLI_STEPS)
+    return run
+
+
+def _validate_positive_capped_int(value: object, name: str, max_value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise typer.BadParameter(f"{name} must be a positive integer")
+    if value > max_value:
+        raise typer.BadParameter(f"{name} must be no greater than {max_value}")
 
 
 def _profile_run_specs(options: RunOptions) -> tuple[list[ProfileRunSpec], list[ProfileRunSpec]]:
@@ -933,20 +1585,25 @@ def _profile_error_records(
     profile_name: str,
     spec: ProfileRunSpec,
     error: str,
+    candidate: ModelCandidate | None = None,
+    guard_context: dict[str, object] | None = None,
 ) -> list:
     config = _profile_run_config(
         options=options,
-        candidate=None,
+        candidate=candidate,
         profile_id=profile_id,
         profile_name=profile_name,
         spec=spec,
     )
+    machine = machine_metadata()
+    if guard_context is not None:
+        machine["mlx_guard_cleanup"] = guard_context.get("cleanup")
     return [
         make_record(
             config,
             run_id=new_run_id(),
             timestamp_utc=utc_timestamp(),
-            machine=machine_metadata(),
+            machine=machine,
             phase="total",
             seconds=0.0,
             error=error,
@@ -992,18 +1649,18 @@ def _print_profile_summary(records: list[dict], jsonl_path: Path, report_path: P
 def _profile_summary_rows(records: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = {}
     for record in records:
-        grouped.setdefault(str(record["run_id"]), []).append(record)
+        grouped.setdefault(_summary_text(record["run_id"]), []).append(record)
     rows = []
     for run_records in grouped.values():
         first = run_records[0]
-        errors = [str(record["error"]) for record in run_records if record.get("error")]
+        errors = [_summary_text(record["error"]) for record in run_records if record.get("error")]
         status = "skipped" if any(error.startswith("skipped:") for error in errors) else ("failed" if errors else "ok")
         rows.append(
             {
-                "preset": first.get("preset") or "manual",
-                "variant": first.get("variant_label") or "manual",
+                "preset": _summary_text(first.get("preset") or "manual"),
+                "variant": _summary_text(first.get("variant_label") or "manual"),
                 "total": _sum_phase(run_records, "total"),
-                "slowest_phase": _slowest_recorded_phase(run_records)[0],
+                "slowest_phase": _summary_text(_slowest_recorded_phase(run_records)[0]),
                 "denoise_avg": _average_phase(run_records, "denoise_step"),
                 "peak_memory": _format_summary_memory(_max_memory(run_records)),
                 "status": status,
@@ -1013,14 +1670,18 @@ def _profile_summary_rows(records: list[dict]) -> list[dict]:
 
 
 def _profile_recommendation(records: list[dict]) -> str:
-    errors = [str(record["error"]) for record in records if record.get("error") and not str(record["error"]).startswith("skipped:")]
+    errors = [
+        _summary_text(record["error"])
+        for record in records
+        if record.get("error") and not _summary_text(record["error"]).startswith("skipped:")
+    ]
     if errors:
         return f"fix failed run first: {errors[0]}"
     phase_totals: dict[str, float] = {}
     total = 0.0
     for record in records:
-        phase = str(record["phase"])
-        seconds = float(record["seconds"])
+        phase = _summary_text(record["phase"])
+        seconds = _finite_record_seconds(record)
         if phase == "total":
             total += seconds
         elif phase != "denoise_step":
@@ -1034,11 +1695,11 @@ def _profile_recommendation(records: list[dict]) -> str:
 
 
 def _sum_phase(records: list[dict], phase: str) -> float:
-    return sum(float(record["seconds"]) for record in records if record["phase"] == phase)
+    return sum(_finite_record_seconds(record) for record in records if record["phase"] == phase)
 
 
 def _average_phase(records: list[dict], phase: str) -> float:
-    values = [float(record["seconds"]) for record in records if record["phase"] == phase]
+    values = [_finite_record_seconds(record) for record in records if record["phase"] == phase]
     if not values:
         return 0.0
     return sum(values) / len(values)
@@ -1047,22 +1708,140 @@ def _average_phase(records: list[dict], phase: str) -> float:
 def _slowest_recorded_phase(records: list[dict]) -> tuple[str, float]:
     phases: dict[str, float] = {}
     for record in records:
-        phase = str(record["phase"])
+        phase = _summary_text(record["phase"])
         if phase in {"total", "denoise_step"}:
             continue
-        phases[phase] = phases.get(phase, 0.0) + float(record["seconds"])
+        phases[phase] = phases.get(phase, 0.0) + _finite_record_seconds(record)
     if not phases:
         return ("none", 0.0)
     return max(phases.items(), key=lambda item: item[1])
 
 
 def _max_memory(records: list[dict]) -> int | None:
-    values = [int(record["peak_memory"]) for record in records if record.get("peak_memory") is not None]
+    values = [
+        value
+        for value in (_non_negative_record_int(record, "peak_memory") for record in records)
+        if value is not None
+    ]
     return max(values) if values else None
 
 
 def _format_summary_memory(value: int | None) -> str:
     return "unavailable" if value is None else str(value)
+
+
+def _finite_record_seconds(record: dict) -> float:
+    raw = record["seconds"]
+    if type(raw) not in {int, float, str}:
+        return 0.0
+    if isinstance(raw, str):
+        raw = _bounded_summary_numeric_text(raw)
+        if raw is None:
+            return 0.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return value
+
+
+def _non_negative_record_int(record: dict, key: str) -> int | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    if type(value) not in {int, str}:
+        return None
+    if isinstance(value, str):
+        value = _bounded_summary_numeric_text(value)
+        if value is None:
+            return None
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        return None
+    if converted < 0:
+        return None
+    return converted
+
+
+def _bounded_summary_numeric_text(value: str) -> str | None:
+    text = value.strip()
+    if len(text) > MAX_SUMMARY_NUMERIC_FIELD_CHARS:
+        return None
+    return text
+
+
+def _summary_text(value: object) -> str:
+    text = _safe_summary_text(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
+    if len(text) <= MAX_SUMMARY_FIELD_CHARS:
+        return text
+    return f"{text[: MAX_SUMMARY_FIELD_CHARS - 12]}...<truncated>"
+
+
+def _safe_summary_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
+
+
+def _safe_exception_text(exc: BaseException) -> str:
+    parts = [_summary_text(arg) for arg in exc.args[:4]]
+    if not parts:
+        exc_type = type(exc)
+        return _summary_text(f"<{exc_type.__module__}.{exc_type.__qualname__}>")
+    if len(exc.args) > 4:
+        parts.append("...<truncated>")
+    if len(parts) == 1:
+        return parts[0]
+    exc_type = type(exc)
+    return _summary_text(f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}")
+
+
+def _release_exception_for_cleanup(exc: BaseException) -> None:
+    _clear_exception_traceback_frames(exc)
+    _detach_exception(exc)
+
+
+def _clear_exception_traceback_frames(exc: BaseException) -> None:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+
+
+def _detach_exception(exc: BaseException) -> None:
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
 
 
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
@@ -1095,7 +1874,11 @@ def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
     for index, candidate in enumerate(candidates, start=1):
         typer.echo(f"{index}. {candidate.id} ({candidate.model_family_guess}) {candidate.path}")
     while True:
-        choice = input("Model number: ").strip()
+        choice = _input_stripped(
+            "Model number: ",
+            label="model selection",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if choice.isdigit():
             index = int(choice)
             if 1 <= index <= len(candidates):
@@ -1182,20 +1965,176 @@ def _import_model_dirs(
     if source in {"ollama", "lmstudio", "all"}:
         typer.echo("Note: LM Studio/Ollama LLM-only and GGUF-only directories are not registered for this video generation profiler.")
 
-    replacement_preview = [path.expanduser().resolve() for path in generation_dirs]
-    typer.echo(f"FASTGEN_MODEL_DIRS={':'.join(str(path) for path in replacement_preview)}")
+    try:
+        replacement_preview = bounded_model_dir_paths(
+            (path.expanduser().resolve() for path in generation_dirs),
+            label="FASTGEN_MODEL_DIRS",
+        )
+        replacement_value = model_dirs_env_value(replacement_preview, label="FASTGEN_MODEL_DIRS")
+    except ValueError as exc:
+        typer.echo(f"[guard] import blocked: {_safe_exception_text(exc)}")
+        return 1
+    typer.echo(f"FASTGEN_MODEL_DIRS={replacement_value}")
     if dry_run:
         typer.echo("Dry run: .env was not modified.")
         return 0
     if require_confirmation:
-        confirm = input(f"Save to {env_file}? [y/N]: ").strip().lower()
+        confirm = _input_stripped(
+            f"Save to {env_file}? [y/N]: ",
+            label="import confirmation",
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        ).lower()
         if confirm not in {"y", "yes"}:
             typer.echo("Import cancelled.")
             return 0
 
-    replacement = replace_model_dirs_in_env(env_file, generation_dirs)
+    replacement = replace_model_dirs_in_env(env_file, replacement_preview)
     typer.echo(f"Updated {env_file}: {len(replacement)} model directories registered.")
     return 0
+
+
+def _convert_model_dir(
+    *,
+    model: str,
+    source: str,
+    output_dir: Path,
+    env_file: Path,
+    variant: str,
+    dtype: str,
+    quantize: bool,
+    bits: int,
+    group_size: int,
+    register: bool,
+    dry_run: bool,
+) -> int:
+    if model == "wan2.2":
+        command = _wan_conversion_command(
+            source=source,
+            output_dir=output_dir,
+            dtype=dtype,
+            quantize=quantize,
+            bits=bits,
+            group_size=group_size,
+        )
+    else:
+        command = _ltx_conversion_command(
+            source=source,
+            output_dir=output_dir,
+            variant=variant,
+        )
+    if command is None:
+        return 1
+
+    typer.echo("Conversion command:")
+    typer.echo(" ".join(command))
+    if dry_run:
+        if register:
+            typer.echo("Dry run: conversion was not run and .env was not modified.")
+        else:
+            typer.echo("Dry run: conversion was not run.")
+        return 0
+
+    guard_error = _conversion_preflight_guard(model)
+    if guard_error is not None:
+        typer.echo(f"[guard] conversion blocked: {guard_error}")
+        return 1
+
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        typer.echo(f"[guard] conversion failed to start: {_safe_exception_text(exc)}")
+        return 1
+    if result.returncode != 0:
+        typer.echo(f"[guard] conversion failed with exit code {result.returncode}")
+        return result.returncode
+
+    typer.echo(f"Converted {model} model to {output_dir}")
+    if register:
+        try:
+            merged = merge_model_dirs_into_env(env_file, [output_dir.expanduser().resolve()])
+        except ValueError as exc:
+            typer.echo(f"[guard] register blocked: {_safe_exception_text(exc)}")
+            return 1
+        typer.echo(f"Updated {env_file}: {len(merged)} model directories registered.")
+    return 0
+
+
+def _wan_conversion_command(
+    *,
+    source: str,
+    output_dir: Path,
+    dtype: str,
+    quantize: bool,
+    bits: int,
+    group_size: int,
+) -> list[str] | None:
+    dtype = _validate_choice(dtype, ("float16", "float32", "bfloat16"), "dtype")
+    if bits not in {4, 8}:
+        typer.echo("[guard] conversion blocked: bits must be one of: 4, 8")
+        return None
+    if group_size not in {32, 64, 128}:
+        typer.echo("[guard] conversion blocked: group-size must be one of: 32, 64, 128")
+        return None
+    source_path = Path(source).expanduser()
+    if not source_path.exists() or not source_path.is_dir():
+        typer.echo(
+            "[guard] conversion blocked: Wan2.2 source must be a local checkpoint directory "
+            f"before conversion: {source}"
+        )
+        return None
+    command = [
+        sys.executable,
+        "-m",
+        "mlx_video.models.wan_2.convert",
+        "--checkpoint-dir",
+        str(source_path),
+        "--output-dir",
+        str(output_dir),
+        "--model-version",
+        "2.2",
+        "--dtype",
+        dtype,
+    ]
+    if quantize:
+        command.extend(["--quantize", "--bits", str(bits), "--group-size", str(group_size)])
+    return command
+
+
+def _ltx_conversion_command(
+    *,
+    source: str,
+    output_dir: Path,
+    variant: str,
+) -> list[str] | None:
+    variant = _validate_choice(variant, ("distilled", "dev"), "variant")
+    return [
+        sys.executable,
+        "-m",
+        "mlx_video.models.ltx_2.convert",
+        "--source",
+        source,
+        "--output",
+        str(output_dir),
+        "--variant",
+        variant,
+    ]
+
+
+def _conversion_preflight_guard(model: str) -> str | None:
+    module_name = "mlx_video.models.wan_2.convert" if model == "wan2.2" else "mlx_video.models.ltx_2.convert"
+    try:
+        module_available = importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        module_available = False
+    if not module_available:
+        return f"{module_name} unavailable; install the mlx extra before converting"
+    try:
+        from fastgen_profiler.mlx_guard import check_memory_guard
+
+        check_memory_guard(label=f"{model} conversion")
+    except Exception as exc:
+        return _safe_exception_text(exc)
+    return None
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -1227,7 +2166,11 @@ def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
         suffix = " (default)" if choice == default else ""
         typer.echo(f"{index}. {choice}{suffix}")
     while True:
-        raw = input(f"{label} [{default}]: ").strip()
+        raw = _input_stripped(
+            f"{label} [{default}]: ",
+            label=label,
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if not raw:
             return default
         if raw.isdigit():
@@ -1241,19 +2184,36 @@ def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
 
 
 def _prompt_text(label: str, default: str) -> str:
-    raw = input(f"{label} [{default}]: ").strip()
+    raw = _input_stripped(
+        f"{label} [{default}]: ",
+        label=label,
+        max_chars=MAX_INTERACTIVE_TEXT_CHARS,
+    )
     return raw or default
 
 
 def _prompt_int(label: str, default: int) -> int:
     while True:
-        raw = input(f"{label} [{default}]: ").strip()
+        raw = _input_stripped(
+            f"{label} [{default}]: ",
+            label=label,
+            max_chars=MAX_INTERACTIVE_CHOICE_CHARS,
+        )
         if not raw:
             return default
         try:
             return int(raw)
         except ValueError:
             typer.echo("Enter an integer.")
+
+
+def _input_stripped(prompt: str, *, label: str, max_chars: int) -> str:
+    typer.echo(prompt, nl=False)
+    raw = sys.stdin.readline(max_chars + 2)
+    line = raw.rstrip("\n\r")
+    if len(line) > max_chars:
+        raise typer.BadParameter(f"{label} must be no longer than {max_chars} chars")
+    return line.strip()
 
 
 if __name__ == "__main__":

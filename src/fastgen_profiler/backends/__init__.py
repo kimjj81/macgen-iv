@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from .base import BackendAdapter
-from .mlx import MLXBackend
-from .stub import StubBackend
 
 
 def create_backend(name: str) -> BackendAdapter:
     if name == "stub":
+        from .stub import StubBackend
+
         return StubBackend()
     if name == "mlx":
+        from .mlx import MLXBackend
+
         return MLXBackend()
     raise ValueError(f"Unknown backend: {name}")
 

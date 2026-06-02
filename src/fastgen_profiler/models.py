@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import chain
 import os
 from pathlib import Path
 from typing import Iterable
@@ -40,6 +41,14 @@ DEFAULT_IMPORT_PATHS = {
     "ollama": ("~/.ollama/models",),
 }
 
+DEFAULT_ENV_FILE_MAX_BYTES = 1024 * 1024
+DEFAULT_MODEL_DISCOVERY_MAX_DIRS = 100_000
+DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES = 10_000
+DEFAULT_MODEL_DISCOVERY_MAX_FILES = 100_000
+DEFAULT_MODEL_DIRS_ENV_MAX_CHARS = 65_536
+DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES = 1_024
+DEFAULT_MODEL_DIR_PATH_MAX_CHARS = 4_096
+
 
 @dataclass(frozen=True, slots=True)
 class ModelCandidate:
@@ -51,12 +60,34 @@ class ModelCandidate:
     markers: tuple[str, ...]
 
 
-def load_env_file(path: Path) -> dict[str, str]:
+def load_env_file(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> dict[str, str]:
     if not path.exists():
         return {}
+    return _parse_env_lines(_read_env_lines(path, max_bytes=max_bytes))
 
+
+def _check_env_file_size(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> None:
+    if max_bytes <= 0:
+        raise ValueError("env file read limit must be positive")
+    file_size = path.stat().st_size
+    if file_size > max_bytes:
+        raise ValueError(
+            f"{path} exceeds env file read limit: {file_size} bytes > {max_bytes} bytes"
+        )
+
+
+def _read_env_lines(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> list[str]:
+    _check_env_file_size(path, max_bytes=max_bytes)
+    lines: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            lines.append(raw_line.rstrip("\n\r"))
+    return lines
+
+
+def _parse_env_lines(lines: Iterable[str]) -> dict[str, str]:
     values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -76,12 +107,15 @@ def model_dirs_from_sources(
 ) -> list[Path]:
     env_values = load_env_file(env_file)
     dirs: list[Path] = []
-    dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIRS")))
+    dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIRS"), label="FASTGEN_MODEL_DIRS"))
 
     if model == "wan2.2":
-        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_WAN22")))
+        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_WAN22"), label="FASTGEN_MODEL_DIR_WAN22"))
     elif model == "ltx2.3":
-        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_LTX23")))
+        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_LTX23"), label="FASTGEN_MODEL_DIR_LTX23"))
+
+    # Auto-discover from well-known sources (DrawThings, HuggingFace cache, etc.)
+    dirs.extend(discover_import_dirs("all"))
 
     if cli_dirs:
         dirs.extend(cli_dirs)
@@ -100,42 +134,103 @@ def discover_import_dirs(source: str) -> list[Path]:
     return _dedupe_paths(found)
 
 
-def discover_generation_model_dirs(roots: Iterable[Path]) -> list[Path]:
+def discover_generation_model_dirs(
+    roots: Iterable[Path],
+    *,
+    max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
+    max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
+) -> list[Path]:
     candidates: list[ModelCandidate] = []
     for model in TARGET_GENERATION_MODELS:
-        candidates.extend(discover_models(roots, model=model))
-    return _dedupe_paths(candidate.path for candidate in candidates)
+        candidates.extend(
+            discover_models(
+                roots,
+                model=model,
+                max_dirs=max_dirs,
+                max_candidates=max_candidates,
+                max_files=max_files,
+            )
+        )
+        _check_candidate_limit(candidates, max_candidates=max_candidates)
+    return _dedupe_paths(_generation_model_dir(candidate) for candidate in candidates)
 
 
-def merge_model_dirs_into_env(env_file: Path, new_dirs: Iterable[Path]) -> list[Path]:
-    env_values = load_env_file(env_file)
-    merged = _dedupe_paths(
-        [
-            *_split_dirs(env_values.get("FASTGEN_MODEL_DIRS")),
-            *(Path(path).expanduser().resolve() for path in new_dirs),
-        ]
+def _generation_model_dir(candidate: ModelCandidate) -> Path:
+    if candidate.path.suffix.lower() in MODEL_MARKER_SUFFIXES:
+        return candidate.path.parent
+    return candidate.path
+
+
+def merge_model_dirs_into_env(
+    env_file: Path,
+    new_dirs: Iterable[Path],
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> list[Path]:
+    env_values = load_env_file(env_file, max_bytes=max_bytes)
+    merged = _dedupe_model_dir_paths(
+        chain(
+            _split_dirs(env_values.get("FASTGEN_MODEL_DIRS")),
+            (Path(path).expanduser().resolve() for path in new_dirs),
+        ),
+        label="FASTGEN_MODEL_DIRS",
     )
-    _write_env_value(env_file, "FASTGEN_MODEL_DIRS", os.pathsep.join(str(path) for path in merged))
-    return merged
-
-
-def replace_model_dirs_in_env(env_file: Path, new_dirs: Iterable[Path]) -> list[Path]:
-    replacement = _dedupe_paths(Path(path).expanduser().resolve() for path in new_dirs)
     _write_env_value(
         env_file,
         "FASTGEN_MODEL_DIRS",
-        os.pathsep.join(str(path) for path in replacement),
+        _model_dirs_env_value(merged, label="FASTGEN_MODEL_DIRS"),
+        max_bytes=max_bytes,
+    )
+    return merged
+
+
+def replace_model_dirs_in_env(
+    env_file: Path,
+    new_dirs: Iterable[Path],
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> list[Path]:
+    replacement = _dedupe_model_dir_paths(
+        (Path(path).expanduser().resolve() for path in new_dirs),
+        label="FASTGEN_MODEL_DIRS",
+    )
+    _write_env_value(
+        env_file,
+        "FASTGEN_MODEL_DIRS",
+        _model_dirs_env_value(replacement, label="FASTGEN_MODEL_DIRS"),
+        max_bytes=max_bytes,
     )
     return replacement
 
 
-def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[ModelCandidate]:
+def discover_models(
+    roots: Iterable[Path],
+    *,
+    model: str | None = None,
+    max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
+    max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
+) -> list[ModelCandidate]:
+    if max_dirs <= 0:
+        raise ValueError("model discovery directory limit must be positive")
+    if max_candidates <= 0:
+        raise ValueError("model discovery candidate limit must be positive")
+    if max_files <= 0:
+        raise ValueError("model discovery file scan limit must be positive")
     candidates: list[ModelCandidate] = []
+    visited_dirs = 0
     for root in _dedupe_paths(roots):
         if not root.exists() or not root.is_dir():
             continue
-        for path in _walk_dirs(root):
-            markers = _markers(path)
+        for path in _walk_dirs(root, max_dirs=max_dirs):
+            visited_dirs += 1
+            if visited_dirs > max_dirs:
+                raise ValueError(
+                    f"model discovery visited more than {max_dirs} directories; "
+                    "narrow --model-dir or import source"
+                )
+            markers = _markers(path, max_files=max_files)
             if not markers:
                 continue
             candidate = ModelCandidate(
@@ -150,6 +245,18 @@ def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[
                 candidates.append(candidate)
             elif _is_generation_model_candidate(candidate, model=model):
                 candidates.append(candidate)
+            _check_candidate_limit(candidates, max_candidates=max_candidates)
+
+        # DrawThings-style flat directory: individual model files in a single dir.
+        # When a directory contains .ckpt/.safetensors files that match the target
+        # model family but the directory itself has no family name, create per-file
+        # candidates.
+        if model is not None:
+            for file_candidate in _discover_flat_model_files(root, model=model, max_files=max_files):
+                if file_candidate not in candidates:
+                    candidates.append(file_candidate)
+                    _check_candidate_limit(candidates, max_candidates=max_candidates)
+
     return sorted(candidates, key=lambda item: (item.model_family_guess == "unknown", item.id))
 
 
@@ -195,11 +302,39 @@ def guess_model_family(path: Path) -> str:
     return "unknown"
 
 
-def _split_dirs(value: str | None) -> list[Path]:
+def _split_dirs(value: str | None, *, label: str = "FASTGEN_MODEL_DIRS") -> list[Path]:
     if not value:
         return []
-    normalized = value.replace(",", os.pathsep)
-    return [Path(part).expanduser() for part in normalized.split(os.pathsep) if part.strip()]
+    if len(value) > DEFAULT_MODEL_DIRS_ENV_MAX_CHARS:
+        raise ValueError(
+            f"{label} value exceeds {DEFAULT_MODEL_DIRS_ENV_MAX_CHARS} chars"
+        )
+    dirs: list[Path] = []
+    for part in _iter_model_dir_parts(value):
+        if len(dirs) >= DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES:
+            raise ValueError(
+                f"{label} contains more than {DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES} entries"
+            )
+        if len(part) > DEFAULT_MODEL_DIR_PATH_MAX_CHARS:
+            raise ValueError(
+                f"{label} entry exceeds {DEFAULT_MODEL_DIR_PATH_MAX_CHARS} chars"
+            )
+        dirs.append(Path(part).expanduser())
+    return dirs
+
+
+def _iter_model_dir_parts(value: str) -> Iterable[str]:
+    start = 0
+    for index, char in enumerate(value):
+        if char not in {",", os.pathsep}:
+            continue
+        part = value[start:index].strip()
+        if part:
+            yield part
+        start = index + 1
+    part = value[start:].strip()
+    if part:
+        yield part
 
 
 def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
@@ -214,30 +349,170 @@ def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
     return deduped
 
 
-def _walk_dirs(root: Path) -> Iterable[Path]:
-    for current, dir_names, _file_names in os.walk(root):
-        dir_names[:] = [
-            name for name in dir_names if name not in SKIP_DIR_NAMES and not name.startswith(".")
-        ]
-        yield Path(current)
+def bounded_model_dir_paths(paths: Iterable[Path], *, label: str = "FASTGEN_MODEL_DIRS") -> list[Path]:
+    return _dedupe_model_dir_paths(paths, label=label)
 
 
-def _markers(path: Path) -> tuple[str, ...]:
+def model_dirs_env_value(paths: Iterable[Path], *, label: str = "FASTGEN_MODEL_DIRS") -> str:
+    return _model_dirs_env_value(_dedupe_model_dir_paths(paths, label=label), label=label)
+
+
+def _dedupe_model_dir_paths(paths: Iterable[Path], *, label: str) -> list[Path]:
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        expanded = path.expanduser()
+        key = str(expanded)
+        if key in seen:
+            continue
+        if len(deduped) >= DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES:
+            raise ValueError(
+                f"{label} contains more than {DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES} entries"
+            )
+        if len(key) > DEFAULT_MODEL_DIR_PATH_MAX_CHARS:
+            raise ValueError(
+                f"{label} entry exceeds {DEFAULT_MODEL_DIR_PATH_MAX_CHARS} chars"
+            )
+        seen.add(key)
+        deduped.append(expanded)
+    return deduped
+
+
+def _model_dirs_env_value(paths: Iterable[Path], *, label: str) -> str:
+    parts: list[str] = []
+    total_chars = 0
+    separator_chars = len(os.pathsep)
+    for path in paths:
+        part = str(path)
+        total_chars += len(part)
+        if parts:
+            total_chars += separator_chars
+        if total_chars > DEFAULT_MODEL_DIRS_ENV_MAX_CHARS:
+            raise ValueError(
+                f"{label} value exceeds {DEFAULT_MODEL_DIRS_ENV_MAX_CHARS} chars"
+            )
+        parts.append(part)
+    return os.pathsep.join(parts)
+
+
+def _walk_dirs(root: Path, *, max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS) -> Iterable[Path]:
+    stack = [root]
+    queued_dirs = 1
+    while stack:
+        current = stack.pop()
+        yield current
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if entry.name in SKIP_DIR_NAMES or entry.name.startswith("."):
+                        continue
+                    queued_dirs += 1
+                    if queued_dirs > max_dirs:
+                        raise ValueError(
+                            f"model discovery queued more than {max_dirs} directories; "
+                            "narrow --model-dir or import source"
+                        )
+                    stack.append(Path(entry.path))
+        except OSError:
+            continue
+
+
+def _check_candidate_limit(
+    candidates: list[ModelCandidate],
+    *,
+    max_candidates: int,
+) -> None:
+    if len(candidates) > max_candidates:
+        raise ValueError(
+            f"model discovery found more than {max_candidates} candidates; "
+            "narrow --model-dir or import source"
+        )
+
+
+def _discover_flat_model_files(
+    root: Path,
+    *,
+    model: str,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
+) -> Iterable[ModelCandidate]:
+    """Find individual model files in a flat directory (DrawThings-style).
+
+    When all model weights live as .ckpt/.safetensors/.gguf files in one
+    directory (no subdirectories per model), the directory-level discovery
+    won't match because the directory name has no model family info.
+    Instead, create one candidate per matching file.
+    """
+    model_suffixes = {".ckpt", ".safetensors", ".gguf", ".mlx"}
+    for scanned, entry in enumerate(_safe_iterdir(root), start=1):
+        if scanned > max_files:
+            raise ValueError(
+                f"model discovery scanned more than {max_files} files in {root}; "
+                "narrow --model-dir or import source"
+            )
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        if entry.suffix.lower() not in model_suffixes:
+            continue
+        family = guess_model_family(entry)
+        if family != model:
+            continue
+        candidate = ModelCandidate(
+            id=entry.name,
+            name=entry.name,
+            path=entry.resolve(),
+            source_root=root.resolve(),
+            model_family_guess=family,
+            markers=(f"*{entry.suffix.lower()}",),
+        )
+        yield candidate
+
+
+def _markers(path: Path, *, max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES) -> tuple[str, ...]:
     markers: list[str] = []
-    try:
-        children = list(path.iterdir())
-    except OSError:
-        return ()
+    for scanned, child in enumerate(_safe_iterdir(path), start=1):
+        if scanned > max_files:
+            raise ValueError(
+                f"model discovery scanned more than {max_files} files in {path}; "
+                "narrow --model-dir or import source"
+            )
+        try:
+            if not child.is_file():
+                continue
+        except OSError:
+            continue
+        if child.name in MODEL_MARKER_FILES:
+            markers.append(child.name)
+        suffix = child.suffix.lower()
+        if suffix in MODEL_MARKER_SUFFIXES:
+            markers.append(f"*{suffix}")
+        if set(MODEL_MARKER_FILES).issubset(markers) and all(
+            f"*{suffix}" in markers for suffix in MODEL_MARKER_SUFFIXES
+        ):
+            break
 
-    names = {child.name for child in children if child.is_file()}
-    for marker in MODEL_MARKER_FILES:
-        if marker in names:
-            markers.append(marker)
-
-    for child in children:
-        if child.is_file() and child.suffix.lower() in MODEL_MARKER_SUFFIXES:
-            markers.append(f"*{child.suffix.lower()}")
     return tuple(sorted(set(markers)))
+
+
+def _safe_iterdir(path: Path) -> Iterable[Path]:
+    try:
+        iterator = path.iterdir()
+        while True:
+            try:
+                yield next(iterator)
+            except StopIteration:
+                return
+            except OSError:
+                return
+    except OSError:
+        return
 
 
 def _is_generation_model_candidate(candidate: ModelCandidate, *, model: str) -> bool:
@@ -257,14 +532,20 @@ def _candidate_id(root: Path, path: Path) -> str:
         return path.name
 
 
-def _write_env_value(env_file: Path, key: str, value: str) -> None:
+def _write_env_value(
+    env_file: Path,
+    key: str,
+    value: str,
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> None:
     line = f"{key}={value}"
     if not env_file.exists():
         env_file.parent.mkdir(parents=True, exist_ok=True)
         env_file.write_text(line + "\n", encoding="utf-8")
         return
 
-    lines = env_file.read_text(encoding="utf-8").splitlines()
+    lines = _read_env_lines(env_file, max_bytes=max_bytes)
     updated = False
     output: list[str] = []
     for existing in lines:

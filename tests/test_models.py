@@ -1,15 +1,134 @@
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 
+import pytest
+
+import fastgen_profiler.models as models_module
 from fastgen_profiler.models import (
     discover_generation_model_dirs,
     discover_import_dirs,
     discover_models,
+    load_env_file,
     merge_model_dirs_into_env,
     model_dirs_from_sources,
     replace_model_dirs_in_env,
 )
+
+
+def test_model_discovery_does_not_materialize_entire_directory_list():
+    source = Path("src/fastgen_profiler/models.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[int] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "list" or not node.args:
+            continue
+        arg = node.args[0]
+        if (
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Attribute)
+            and arg.func.attr == "iterdir"
+        ):
+            offenders.append(node.lineno)
+
+    assert offenders == []
+
+
+def test_model_discovery_does_not_use_os_walk_file_list_materialization():
+    source = Path("src/fastgen_profiler/models.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[int] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "walk":
+            continue
+        if isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+            offenders.append(node.lineno)
+
+    assert offenders == []
+
+
+def test_model_discovery_rejects_excessive_directory_traversal(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    walked = [root / "wan-one", root / "wan-two"]
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(walked))
+    monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ())
+
+    with pytest.raises(ValueError, match="visited more than 1 directories"):
+        discover_models([root], model="wan2.2", max_dirs=1)
+
+
+def test_model_discovery_rejects_high_fanout_before_stack_growth(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    for index in range(3):
+        (root / f"child-{index}").mkdir()
+
+    with pytest.raises(ValueError, match="queued more than 2 directories"):
+        discover_models([root], model="wan2.2", max_dirs=2)
+
+
+def test_model_discovery_rejects_excessive_candidate_accumulation(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    walked = [root / "wan-one", root / "wan-two"]
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(walked))
+    monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ("config.json",))
+
+    with pytest.raises(ValueError, match="found more than 1 candidates"):
+        discover_models([root], model="wan2.2", max_candidates=1)
+
+
+def test_model_discovery_rejects_excessive_marker_file_scan(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "wan2.2-large-dir"
+    model_dir.mkdir(parents=True)
+    for index in range(3):
+        (model_dir / f"nonmatch-{index}.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="scanned more than 2 files"):
+        discover_models([root], model="wan2.2", max_files=2)
+
+
+def test_model_discovery_rejects_excessive_flat_file_scan(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    for index in range(3):
+        (root / f"nonmatch-{index}.txt").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path, **kwargs: iter(()))
+
+    with pytest.raises(ValueError, match="scanned more than 2 files"):
+        discover_models([root], model="wan2.2", max_files=2)
+
+
+def test_model_marker_scan_ignores_iteration_time_filesystem_interrupt():
+    class FakeChild:
+        name = "config.json"
+        suffix = ".json"
+
+        def is_file(self):
+            return True
+
+    class FakePath:
+        def __str__(self):
+            return "fake-model-dir"
+
+        def iterdir(self):
+            yield FakeChild()
+            raise InterruptedError("scan interrupted")
+
+    assert models_module._markers(FakePath()) == ("config.json",)
 
 
 def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):
@@ -65,6 +184,32 @@ def test_generation_model_dirs_returns_leaf_wan_ltx_directories(tmp_path):
     assert dirs == [wan_model.resolve(), ltx_model.resolve()]
 
 
+def test_generation_model_dirs_registers_parent_for_flat_draw_things_files(tmp_path):
+    root = tmp_path / "Draw Things" / "Models"
+    root.mkdir(parents=True)
+    wan_file = root / "wan_v2.2_5b_ti2v_q8p.ckpt"
+    ltx_file = root / "ltx_2.3_22b_distilled_1.1_q6p.ckpt"
+    wan_file.write_text("", encoding="utf-8")
+    ltx_file.write_text("", encoding="utf-8")
+
+    dirs = discover_generation_model_dirs([root])
+
+    assert dirs == [root.resolve()]
+
+
+def test_generation_model_dirs_enforces_global_candidate_limit(tmp_path):
+    root = tmp_path / "models"
+    wan_model = root / "wan2.2-video"
+    ltx_model = root / "ltx2.3-video"
+    wan_model.mkdir(parents=True)
+    ltx_model.mkdir(parents=True)
+    (wan_model / "model.safetensors").write_text("", encoding="utf-8")
+    (ltx_model / "model.safetensors").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="found more than 1 candidates"):
+        discover_generation_model_dirs([root], max_candidates=1)
+
+
 def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
     env_dir = tmp_path / "env-models"
     family_dir = tmp_path / "wan-models"
@@ -81,7 +226,75 @@ def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
         env_file=env_file,
     )
 
-    assert dirs == [env_dir, family_dir, cli_dir]
+    # env dirs and cli dir must all be present (auto-discovered dirs may also appear)
+    assert env_dir in dirs
+    assert family_dir in dirs
+    assert cli_dir in dirs
+
+
+def test_model_dirs_from_env_rejects_oversized_value_before_split(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIRS=" + ("x" * 70_000) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS value exceeds 65536 chars"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_model_dirs_from_env_rejects_too_many_entries(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "FASTGEN_MODEL_DIRS=" + os.pathsep.join(f"/models/{index}" for index in range(1_025)) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS contains more than 1024 entries"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_model_dirs_from_env_rejects_oversized_entry(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIR_WAN22=/models/" + ("x" * 5_000) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIR_WAN22 entry exceeds 4096 chars"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_merge_model_dirs_rejects_too_many_new_entries_before_env_write(tmp_path):
+    env_file = tmp_path / ".env"
+    new_dirs = (tmp_path / f"model-{index}" for index in range(1_025))
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS contains more than 1024 entries"):
+        merge_model_dirs_into_env(env_file, new_dirs)
+
+    assert not env_file.exists()
+
+
+def test_replace_model_dirs_rejects_oversized_env_value_before_write(tmp_path):
+    env_file = tmp_path / ".env"
+    long_dirs = (tmp_path / ("model-" + ("x" * 90) + str(index)) for index in range(900))
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS value exceeds 65536 chars"):
+        replace_model_dirs_in_env(env_file, long_dirs)
+
+    assert not env_file.exists()
+
+
+def test_load_env_file_rejects_oversized_file_before_parsing(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIRS=/models\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exceeds env file read limit"):
+        load_env_file(env_file, max_bytes=8)
+
+
+def test_merge_model_dirs_rejects_oversized_existing_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OTHER=value\n", encoding="utf-8")
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+
+    with pytest.raises(ValueError, match="exceeds env file read limit"):
+        merge_model_dirs_into_env(env_file, [model_dir], max_bytes=8)
 
 
 def test_discovers_default_import_dirs_for_supported_sources(tmp_path, monkeypatch):
