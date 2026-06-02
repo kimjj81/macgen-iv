@@ -511,13 +511,24 @@ def _bound_steps_result(value: Any) -> Any:
             if index >= STEPS_RESULT_COLLECTION_MAX_ITEMS:
                 bounded["__truncated_items__"] = True
                 break
-            bounded[_bound_steps_text(str(key))] = _bound_steps_result(item)
+            bounded[_safe_steps_text(key)] = _bound_steps_result(item)
         return bounded
     if isinstance(value, list):
         return _bound_steps_sequence(value)
     if isinstance(value, tuple):
         return _bound_steps_sequence(value)
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _safe_steps_text(value)
+
+
+def _safe_steps_text(value: Any) -> str:
+    if isinstance(value, str):
+        return _bound_steps_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return _bound_steps_text(str(value))
+    value_type = type(value)
+    return _bound_steps_text(f"<{value_type.__module__}.{value_type.__qualname__}>")
 
 
 def _bound_steps_text(value: str) -> str:

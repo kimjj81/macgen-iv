@@ -394,6 +394,44 @@ def test_steps_benchmark_child_result_bounds_text_and_collections(tmp_path, monk
     assert record["cleanup"]["nested"]["__truncated_items__"] is True
 
 
+def test_steps_benchmark_summarizes_unknown_result_values_without_repr_or_str(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_unknown_result_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+    result_path = tmp_path / "results.jsonl"
+
+    class UnsafeValue:
+        def __repr__(self):
+            raise AssertionError("steps result bounding must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("steps result bounding must not call str on unknown values")
+
+    class UnsafeKey:
+        def __repr__(self):
+            raise AssertionError("steps result bounding must not call repr on unknown keys")
+
+        def __str__(self):
+            raise AssertionError("steps result bounding must not call str on unknown keys")
+
+    module._write_steps_jsonl(
+        result_path,
+        [{"steps": 1, "cleanup": {UnsafeKey(): UnsafeValue()}}],
+    )
+
+    record = json.loads(result_path.read_text(encoding="utf-8"))
+    cleanup = record["cleanup"]
+    key = next(iter(cleanup))
+    assert "UnsafeKey" in key
+    assert "UnsafeValue" in cleanup[key]
+
+
 def test_steps_benchmark_child_rejects_invalid_step_env(tmp_path, monkeypatch):
     import importlib.util
 
