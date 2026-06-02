@@ -366,10 +366,18 @@ def run_command(options: RunOptions) -> int:
                 error=runtime_abort_error or "Runtime memory abort",
                 guard_context=cleanup_status,
             )
+        records, limit_error = _bounded_profile_records(records, current_count=0)
+        if limit_error is not None:
+            guard_failed = True
+            records = _error_records_for_config(
+                config,
+                error=limit_error,
+                guard_context=cleanup_status,
+            )
         append_jsonl(options.result_jsonl, records)
         if options.backend == "mlx" and _records_have_errors(records):
             return 1
-        if memory_aborted or guard_failed:
+        if limit_error is not None or memory_aborted or guard_failed:
             return 1
     return 0
 

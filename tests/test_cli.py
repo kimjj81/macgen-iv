@@ -338,6 +338,73 @@ def test_report_command_fails_closed_before_rendering_oversized_jsonl(tmp_path, 
     assert not report_path.exists()
 
 
+def test_run_command_fails_closed_on_oversized_record_stream(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    monkeypatch.setattr(cli_module, "MAX_REPORT_RECORDS", 3)
+    yielded = 0
+
+    def oversized_records(config):
+        nonlocal yielded
+        for index in range(5):
+            yielded += 1
+            yield cli_module.make_record(
+                config,
+                run_id=f"run-{index}",
+                timestamp_utc="2026-01-01T00:00:00Z",
+                machine={},
+                phase="total",
+                seconds=0.0,
+            )
+
+    monkeypatch.setattr(cli_module.Profiler, "run", lambda self, config: oversized_records(config))
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "stub",
+            "--prompt",
+            "oversized stream",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "2",
+            "--guidance",
+            "2.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    assert yielded == 4
+    records = _read_jsonl(jsonl_path)
+    assert len(records) == 1
+    assert records[0]["phase"] == "total"
+    assert "profile record limit exceeded" in records[0]["error"]
+
+
 def test_profile_summary_bounds_text_and_ignores_non_finite_metrics():
     long_error = "failed: " + ("z" * 1_000)
     records = [
