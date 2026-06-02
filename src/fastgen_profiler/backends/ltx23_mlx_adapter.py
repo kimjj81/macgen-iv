@@ -19,6 +19,7 @@ from typing import Any
 
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
+_MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
@@ -212,7 +213,7 @@ class LTX23MLXPipeline:
                 "Refusing to initialize MLX before local model config is present."
             )
         self._check_file_load(config_path, "preflight transformer config")
-        config_dict = json.loads(config_path.read_text(encoding="utf-8"))
+        config_dict = _read_bounded_json_config(config_path, "transformer config")
         for key, value in _iter_config_numbers(config_dict):
             if value <= 0 and _is_structural_config_key(key):
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
@@ -340,8 +341,7 @@ class LTX23MLXPipeline:
         self._preflight_text_encoder_assets(text_encoder_dir)
         config_path = text_encoder_dir / "config.json"
         self._check_file_load(config_path, "preflight text_encoder config")
-        with open(config_path) as f:
-            full_config = json.load(f)
+        full_config = _read_bounded_json_config(config_path, "text_encoder config")
         text_config = full_config["text_config"]
         self._preflight_text_model_config(text_config, "text_encoder model config")
         from transformers import AutoTokenizer
@@ -424,8 +424,7 @@ class LTX23MLXPipeline:
             self._check_memory("model_construct before")
             # Load config JSON directly to preserve original model structure
             if config_dict is None:
-                with open(config_path) as f:
-                    config_dict = json.load(f)
+                config_dict = _read_bounded_json_config(config_path, "transformer config")
             self.config = LTXModelConfig(**config_dict)
             self.model = LTXModel(self.config)
             self._check_memory("model_construct after")
@@ -586,8 +585,7 @@ class LTX23MLXPipeline:
         shards = self._preflight_text_encoder_assets(text_encoder_dir)
         config_path = text_encoder_dir / "config.json"
         self._check_file_load(config_path, "read text_encoder config")
-        with open(config_path) as f:
-            full_config = json.load(f)
+        full_config = _read_bounded_json_config(config_path, "text_encoder config")
         text_config = full_config["text_config"]
         self._preflight_text_model_config(text_config, "text_encoder model config")
         from transformers import AutoTokenizer
@@ -1023,6 +1021,32 @@ def _positive_structural_int(value: Any, key: str) -> int:
             "refusing to construct MLX model"
         )
     return result
+
+
+def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"cannot stat {path} before reading LTX2.3 {label}; refusing unbounded config load"
+        ) from exc
+    if size > _MAX_CONFIG_JSON_BYTES:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"LTX2.3 {label} at {path} is {size} bytes, above safe config limit "
+            f"{_MAX_CONFIG_JSON_BYTES}; refusing unbounded config load"
+        )
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"LTX2.3 {label} at {path} must be a JSON object; refusing to construct MLX model"
+        )
+    return config
 
 
 def _numpy() -> Any:

@@ -21,6 +21,7 @@ from typing import Any
 
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
+_MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 
 
 def _require_non_empty_parameters(component: Any, label: str) -> Any:
@@ -731,13 +732,13 @@ def _load_config(model_path: Path) -> tuple[Any, dict[str, Any] | None]:
             "Refusing to load mlx_video config defaults before local model structure is known."
         )
 
-    from mlx_video.models.wan_2.config import WanModelConfig
-
-    config_dict = json.loads(config_path.read_text(encoding="utf-8"))
+    config_dict = _read_bounded_json_config(config_path, "model config")
     quantization = config_dict.pop("quantization", None)
     for key in ("patch_size", "vae_stride", "window_size", "sample_guide_scale"):
         if key in config_dict and isinstance(config_dict[key], list):
             config_dict[key] = tuple(config_dict[key])
+    from mlx_video.models.wan_2.config import WanModelConfig
+
     valid_names = {field.name for field in fields(WanModelConfig)}
     config = WanModelConfig(**{key: value for key, value in config_dict.items() if key in valid_names})
     if config.in_dim == 48 and config.vae_z_dim != 48:
@@ -753,7 +754,7 @@ def _load_config(model_path: Path) -> tuple[Any, dict[str, Any] | None]:
 
 
 def _load_raw_config_for_preflight(config_path: Path) -> Any:
-    config_dict = json.loads(config_path.read_text(encoding="utf-8"))
+    config_dict = _read_bounded_json_config(config_path, "preflight config")
     config = SimpleNamespace(
         patch_size=_positive_int_tuple(config_dict.get("patch_size", (1, 2, 2)), "patch_size", length=3),
         vae_stride=_positive_int_tuple(config_dict.get("vae_stride", (4, 16, 16)), "vae_stride", length=3),
@@ -813,6 +814,32 @@ def _positive_int(value: Any, key: str) -> int:
             "refusing to construct MLX model"
         )
     return result
+
+
+def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"cannot stat {path} before reading Wan2.2 {label}; refusing unbounded config load"
+        ) from exc
+    if size > _MAX_CONFIG_JSON_BYTES:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"Wan2.2 {label} at {path} is {size} bytes, above safe config limit "
+            f"{_MAX_CONFIG_JSON_BYTES}; refusing unbounded config load"
+        )
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"Wan2.2 {label} at {path} must be a JSON object; refusing to construct MLX model"
+        )
+    return config
 
 
 def _non_negative_int(value: Any, key: str) -> int:

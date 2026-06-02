@@ -4,10 +4,13 @@ import ast
 import os
 from pathlib import Path
 
+import pytest
+
 from fastgen_profiler.models import (
     discover_generation_model_dirs,
     discover_import_dirs,
     discover_models,
+    load_env_file,
     merge_model_dirs_into_env,
     model_dirs_from_sources,
     replace_model_dirs_in_env,
@@ -108,6 +111,24 @@ def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
     assert env_dir in dirs
     assert family_dir in dirs
     assert cli_dir in dirs
+
+
+def test_load_env_file_rejects_oversized_file_before_parsing(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIRS=/models\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exceeds env file read limit"):
+        load_env_file(env_file, max_bytes=8)
+
+
+def test_merge_model_dirs_rejects_oversized_existing_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OTHER=value\n", encoding="utf-8")
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+
+    with pytest.raises(ValueError, match="exceeds env file read limit"):
+        merge_model_dirs_into_env(env_file, [model_dir], max_bytes=8)
 
 
 def test_discovers_default_import_dirs_for_supported_sources(tmp_path, monkeypatch):

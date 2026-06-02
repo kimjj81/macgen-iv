@@ -40,6 +40,8 @@ DEFAULT_IMPORT_PATHS = {
     "ollama": ("~/.ollama/models",),
 }
 
+DEFAULT_ENV_FILE_MAX_BYTES = 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class ModelCandidate:
@@ -51,12 +53,34 @@ class ModelCandidate:
     markers: tuple[str, ...]
 
 
-def load_env_file(path: Path) -> dict[str, str]:
+def load_env_file(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> dict[str, str]:
     if not path.exists():
         return {}
+    return _parse_env_lines(_read_env_lines(path, max_bytes=max_bytes))
 
+
+def _check_env_file_size(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> None:
+    if max_bytes <= 0:
+        raise ValueError("env file read limit must be positive")
+    file_size = path.stat().st_size
+    if file_size > max_bytes:
+        raise ValueError(
+            f"{path} exceeds env file read limit: {file_size} bytes > {max_bytes} bytes"
+        )
+
+
+def _read_env_lines(path: Path, *, max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES) -> list[str]:
+    _check_env_file_size(path, max_bytes=max_bytes)
+    lines: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            lines.append(raw_line.rstrip("\n\r"))
+    return lines
+
+
+def _parse_env_lines(lines: Iterable[str]) -> dict[str, str]:
     values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -110,24 +134,40 @@ def discover_generation_model_dirs(roots: Iterable[Path]) -> list[Path]:
     return _dedupe_paths(candidate.path for candidate in candidates)
 
 
-def merge_model_dirs_into_env(env_file: Path, new_dirs: Iterable[Path]) -> list[Path]:
-    env_values = load_env_file(env_file)
+def merge_model_dirs_into_env(
+    env_file: Path,
+    new_dirs: Iterable[Path],
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> list[Path]:
+    env_values = load_env_file(env_file, max_bytes=max_bytes)
     merged = _dedupe_paths(
         [
             *_split_dirs(env_values.get("FASTGEN_MODEL_DIRS")),
             *(Path(path).expanduser().resolve() for path in new_dirs),
         ]
     )
-    _write_env_value(env_file, "FASTGEN_MODEL_DIRS", os.pathsep.join(str(path) for path in merged))
+    _write_env_value(
+        env_file,
+        "FASTGEN_MODEL_DIRS",
+        os.pathsep.join(str(path) for path in merged),
+        max_bytes=max_bytes,
+    )
     return merged
 
 
-def replace_model_dirs_in_env(env_file: Path, new_dirs: Iterable[Path]) -> list[Path]:
+def replace_model_dirs_in_env(
+    env_file: Path,
+    new_dirs: Iterable[Path],
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> list[Path]:
     replacement = _dedupe_paths(Path(path).expanduser().resolve() for path in new_dirs)
     _write_env_value(
         env_file,
         "FASTGEN_MODEL_DIRS",
         os.pathsep.join(str(path) for path in replacement),
+        max_bytes=max_bytes,
     )
     return replacement
 
@@ -310,14 +350,20 @@ def _candidate_id(root: Path, path: Path) -> str:
         return path.name
 
 
-def _write_env_value(env_file: Path, key: str, value: str) -> None:
+def _write_env_value(
+    env_file: Path,
+    key: str,
+    value: str,
+    *,
+    max_bytes: int = DEFAULT_ENV_FILE_MAX_BYTES,
+) -> None:
     line = f"{key}={value}"
     if not env_file.exists():
         env_file.parent.mkdir(parents=True, exist_ok=True)
         env_file.write_text(line + "\n", encoding="utf-8")
         return
 
-    lines = env_file.read_text(encoding="utf-8").splitlines()
+    lines = _read_env_lines(env_file, max_bytes=max_bytes)
     updated = False
     output: list[str] = []
     for existing in lines:

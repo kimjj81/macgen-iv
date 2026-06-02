@@ -2167,6 +2167,38 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         limits.assert_not_called()
 
+    def test_ltx23_transformer_config_rejects_oversized_json_before_read(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        transformer_dir = tmp_path / "transformer"
+        transformer_dir.mkdir()
+        (transformer_dir / "config.json").write_text(
+            " " * (ltx23_mlx_adapter._MAX_CONFIG_JSON_BYTES + 1),
+            encoding="utf-8",
+        )
+        (transformer_dir / "model.safetensors").write_bytes(b"x")
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+
+        with patch("fastgen_profiler.mlx_guard.configure_mlx_resource_limits") as limits:
+            with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
+                pipe.load_model()
+
+        limits.assert_not_called()
+
     def test_ltx23_load_model_rejects_unsafe_structural_config_before_mlx_limits(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -4362,6 +4394,42 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="read text_encoder config too large"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 4096)
 
+    def test_ltx23_text_encoder_config_rejects_oversized_json_before_tokenizer(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        text_encoder_dir.mkdir()
+        tokenizer_dir.mkdir()
+        (text_encoder_dir / "config.json").write_text(
+            " " * (ltx23_mlx_adapter._MAX_CONFIG_JSON_BYTES + 1),
+            encoding="utf-8",
+        )
+        (text_encoder_dir / "model.safetensors").write_bytes(b"x")
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"mlx", "mlx.core", "mlx_lm.models.gemma3_text", "transformers"}:
+                raise AssertionError("oversized text config must be rejected before tokenizer or MLX imports")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
+            pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, 4096)
+
     def test_wan22_tokenizer_preflight_blocks_before_mlx_limits(self, tmp_path):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
 
@@ -5657,6 +5725,39 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(FileNotFoundError, match="Wan2.2 config not found"):
             _load_config(tmp_path)
+
+    def test_wan22_load_config_rejects_oversized_json_before_mlx_video(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import wan22_mlx_adapter
+        from fastgen_profiler.backends.wan22_mlx_adapter import _load_config
+
+        (tmp_path / "config.json").write_text(
+            " " * (wan22_mlx_adapter._MAX_CONFIG_JSON_BYTES + 1),
+            encoding="utf-8",
+        )
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name.startswith("mlx_video"):
+                raise AssertionError("oversized Wan config must be rejected before mlx_video imports")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
+            _load_config(tmp_path)
+
+    def test_wan22_raw_config_rejects_oversized_json_before_read(self, tmp_path):
+        from fastgen_profiler.backends import wan22_mlx_adapter
+        from fastgen_profiler.backends.wan22_mlx_adapter import _load_raw_config_for_preflight
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            " " * (wan22_mlx_adapter._MAX_CONFIG_JSON_BYTES + 1),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
+            _load_raw_config_for_preflight(config_path)
 
     def test_ltx23_text_encoder_helper_is_local_first_by_default(self, tmp_path):
         from fastgen_profiler.backends.ltx23_text_encoder_download import ensure_text_encoder

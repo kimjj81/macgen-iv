@@ -30,6 +30,8 @@ to bypass the child-process MLX availability probe with environment variables.
 Model structure must not be guessed from package defaults before MLX is
 initialized. Wan2.2 and LTX2.3 local adapters must reject missing config files
 before importing `mlx.core` or `mlx_video` model modules.
+Local model config JSON files must be size-capped and verified as JSON objects
+before parser allocation or MLX/video package imports.
 
 `mlx_cleanup()` must not initialize MLX in a fresh process. It may only clear
 MLX caches when `mlx.core` is already loaded in the current process.
@@ -71,6 +73,9 @@ Result/report readers must also remain bounded. JSONL benchmark result files
 may be appended over many runs, so report generation must reject input files
 above a fixed byte limit and stop before accumulating an excessive number of
 records in host memory.
+User-selected configuration files such as `--env-file` must also be capped
+before parsing or preservation rewrites, because model discovery and import can
+run before any MLX-specific guard is active.
 Video postprocess and frame export preflights must reserve more than the input
 frame buffer because lower-level encoders and image writers may allocate
 contiguous, converted, or temporary buffers outside MLX allocator counters.
