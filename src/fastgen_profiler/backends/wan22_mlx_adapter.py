@@ -568,11 +568,15 @@ class Wan22MLXPipeline:
             raise
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
-        if self.mx is None or self.model is None or self.scheduler is None:
+        if self.mx is None or self.model is None or self.scheduler is None or self.config is None:
             raise RuntimeError("denoise_step called before load_model")
+        self._validate_denoise_step_args(step_index=step_index, steps=steps)
         if self.seq_len is None or self.cross_kv is None or self.rope_cos_sin is None:
             raise RuntimeError("denoise_step called before encode_text")
-        self._validate_denoise_step_args(step_index=step_index, steps=steps)
+        if self.cfg_disabled and self.context_cond is None:
+            raise RuntimeError("denoise_step called before encode_text")
+        if not self.cfg_disabled and self.context_cfg is None:
+            raise RuntimeError("denoise_step called before encode_text")
         phase = f"denoise {step_index + 1}/{steps}"
 
         try:
