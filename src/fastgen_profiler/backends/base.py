@@ -98,9 +98,15 @@ def mlx_memory_snapshot() -> dict[str, int | None]:
         return {"active_memory": None, "peak_memory": None, "cache_memory": None}
     try:
         return {
-            "active_memory": mx.get_active_memory(),
-            "peak_memory": mx.get_peak_memory(),
-            "cache_memory": mx.get_cache_memory(),
+            "active_memory": _memory_counter_or_none(mx.get_active_memory()),
+            "peak_memory": _memory_counter_or_none(mx.get_peak_memory()),
+            "cache_memory": _memory_counter_or_none(mx.get_cache_memory()),
         }
     except Exception:
         return {"active_memory": None, "peak_memory": None, "cache_memory": None}
+
+
+def _memory_counter_or_none(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value

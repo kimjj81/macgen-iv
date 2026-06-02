@@ -870,6 +870,7 @@ class LTX23MLXPipeline:
                     vae_temp.per_channel_statistics.std,
                 )
                 self._eval_mlx(mx, latents, phase="upsample_latents")
+                self._check_tensor_shape_allocation(latents, "upsampled latent tensor", multiplier=8)
                 self._check_memory("upsample_latents after")
                 del upsampler, vae_temp
                 mx.clear_cache()
@@ -974,6 +975,32 @@ class LTX23MLXPipeline:
         except Exception as exc:
             _cleanup_loaded_runtime_after_error(exc)
             raise
+
+    def _check_tensor_shape_allocation(self, tensor: Any, phase: str, *, multiplier: int = 4) -> None:
+        shape = getattr(tensor, "shape", None)
+        if shape is None:
+            _raise_runtime_abort(
+                f"LTX2.3 {phase} has no shape; refusing to continue without allocation preflight"
+            )
+        try:
+            dimensions = tuple(shape)
+        except TypeError:
+            _raise_runtime_abort(
+                f"LTX2.3 {phase} shape {shape!r} is not a finite integer shape; "
+                "refusing to continue without allocation preflight"
+            )
+        for dim in dimensions:
+            if not isinstance(dim, int) or isinstance(dim, bool):
+                _raise_runtime_abort(
+                    f"LTX2.3 {phase} shape {shape!r} is not a finite integer shape; "
+                    "refusing to continue without allocation preflight"
+                )
+        elements = math.prod(dimensions)
+        if elements <= 0:
+            _raise_runtime_abort(
+                f"LTX2.3 {phase} shape {shape!r} has no positive elements; refusing to continue"
+            )
+        self._check_host_allocation(elements * 4 * multiplier, phase)
 
 
 def create_ltx23_pipeline(**kwargs: Any) -> LTX23MLXPipeline:

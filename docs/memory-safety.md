@@ -69,6 +69,8 @@ During a run, the watchdog must check both system memory pressure and MLX
 allocator counters when MLX is loaded. If active plus cached MLX memory nears
 the configured allocator limit, the run must abort and clean up before system
 memory pressure becomes critical.
+MLX allocator counters must be non-negative integer byte counts. Invalid
+counter values are unknown runtime telemetry and must fail closed.
 If runtime telemetry cannot be captured at all, the watchdog must also abort
 and clean up; unknown memory state during MLX/Metal work is unsafe.
 Large host allocation preflights must follow the same macOS telemetry rule:

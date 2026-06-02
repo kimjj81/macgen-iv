@@ -532,6 +532,35 @@ class TestCheckRuntimeMemory:
 
         mock_cleanup.assert_called_once()
 
+    @pytest.mark.parametrize("counter_value", [-1, "100", 1.5, True])
+    @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_runtime_fails_closed_when_mlx_allocator_counter_is_invalid(
+        self,
+        mock_snap,
+        mock_cleanup,
+        monkeypatch,
+        counter_value,
+    ):
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setattr(mx, "get_active_memory", lambda: counter_value)
+        monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+        monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", 1000)
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=80 * 1024 ** 3,
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.2,
+            swap_files=0,
+            free_fraction=80 / 128,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot read MLX allocator memory"):
+            check_runtime_memory(label="mlx-invalid-counter")
+
+        mock_cleanup.assert_called_once()
+
     def test_cleanup_does_not_import_mlx_when_runtime_is_absent(self, monkeypatch):
         sys.modules.pop("mlx.core", None)
         real_import = builtins.__import__
@@ -1720,6 +1749,22 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         monkeypatch.setattr(builtins, "__import__", guarded_import)
 
         synchronize_mlx(object())
+
+    def test_base_mlx_memory_snapshot_sanitizes_invalid_counters(self, monkeypatch):
+        from fastgen_profiler.backends.base import mlx_memory_snapshot
+
+        fake_mx = types.SimpleNamespace(
+            get_active_memory=lambda: -1,
+            get_peak_memory=lambda: "100",
+            get_cache_memory=lambda: 50,
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        assert mlx_memory_snapshot() == {
+            "active_memory": None,
+            "peak_memory": None,
+            "cache_memory": 50,
+        }
 
     def test_adapter_synchronize_does_not_import_mlx(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -4975,6 +5020,89 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeError, match="decoded LTX2.3 frames must have shape"):
             pipe.decode(FakeLatents())
+
+    def test_ltx23_decode_preflights_upsampled_latents_before_vae_forward(self, tmp_path, monkeypatch):
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        vae_decoder_dir = tmp_path / "vae" / "decoder"
+        vae_decoder_dir.mkdir(parents=True)
+        (vae_decoder_dir / "decoder.safetensors").write_bytes(b"x")
+        (tmp_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors").write_bytes(b"x")
+
+        class FakeVAE:
+            per_channel_statistics = types.SimpleNamespace(mean=0, std=1)
+
+            def parameters(self):
+                return object()
+
+            def __call__(self, latents):
+                raise AssertionError("VAE forward must be rejected before oversized upsampled latents")
+
+        class FakeVideoDecoder:
+            @classmethod
+            def from_pretrained(cls, path):
+                return FakeVAE()
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
+
+        class FakeUpsampledLatents:
+            shape = (1, 128, 4, 64, 64)
+
+        class FakeUpsampler:
+            def parameters(self):
+                return object()
+
+        fake_mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+        decoder_module = types.ModuleType("mlx_video.models.ltx_2.video_vae.decoder")
+        decoder_module.VideoDecoder = FakeVideoDecoder
+        upsampler_module = types.ModuleType("mlx_video.models.ltx_2.upsampler")
+        upsampler_module.load_upsampler = lambda path: (FakeUpsampler(), None)
+        upsampler_module.upsample_latents = lambda *args: FakeUpsampledLatents()
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, decoder_module.__name__, decoder_module)
+        monkeypatch.setitem(sys.modules, upsampler_module.__name__, upsampler_module)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: (
+            (_ for _ in ()).throw(RuntimeMemoryAbort("upsampled latent tensor too large"))
+            if phase == "upsampled latent tensor"
+            else None
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="upsampled latent tensor too large"):
+            pipe.decode(FakeLatents())
+
+    def test_ltx23_tensor_allocation_rejects_coerced_shape_dimensions(self, tmp_path):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeTensor:
+            shape = (1, "128", 4, 64, 64)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="not a finite integer shape"):
+            pipe._check_tensor_shape_allocation(FakeTensor(), "coerced tensor")
 
     def test_wan22_decode_preflights_output_tensor_before_vae_forward(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline

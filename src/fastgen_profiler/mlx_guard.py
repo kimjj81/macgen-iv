@@ -656,8 +656,8 @@ def _check_mlx_runtime_limit(label: str) -> None:
     if mx is None:
         return
     try:
-        active = int(mx.get_active_memory())
-        cache = int(mx.get_cache_memory())
+        active = _mlx_counter_bytes(mx.get_active_memory(), "active")
+        cache = _mlx_counter_bytes(mx.get_cache_memory(), "cache")
     except Exception as exc:
         mlx_cleanup()
         raise RuntimeMemoryAbort(
@@ -673,6 +673,12 @@ def _check_mlx_runtime_limit(label: str) -> None:
             f"{used / 1e9:.1f}GB is above {RUNTIME_MLX_LIMIT_ABORT_FRACTION * 100:.0f}% "
             f"of configured limit {_current_mlx_memory_limit_bytes / 1e9:.1f}GB."
         )
+
+
+def _mlx_counter_bytes(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"MLX {name} memory counter must be a non-negative integer, got {value!r}")
+    return value
 
 
 def check_host_allocation_headroom(
