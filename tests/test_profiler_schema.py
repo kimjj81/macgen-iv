@@ -5,7 +5,15 @@ from pathlib import Path
 import sys
 
 from fastgen_profiler.backends import create_backend
-from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig, machine_metadata, read_jsonl
+from fastgen_profiler.metrics import (
+    MAX_METRIC_COLLECTION_ITEMS,
+    MAX_METRIC_TEXT_FIELD_CHARS,
+    REQUIRED_PHASES,
+    RunConfig,
+    machine_metadata,
+    make_record,
+    read_jsonl,
+)
 from fastgen_profiler.profiler import Profiler
 from fastgen_profiler.reports.markdown import render_markdown_report
 
@@ -124,6 +132,63 @@ def test_read_jsonl_rejects_more_records_than_limit(tmp_path):
         assert "exceeds JSONL record limit" in str(exc)
     else:
         raise AssertionError("read_jsonl should reject excessive record counts")
+
+
+def test_measurement_record_bounds_serialized_text_fields():
+    config = RunConfig(
+        model="wan2.2",
+        backend="stub",
+        model_path="x" * (MAX_METRIC_TEXT_FIELD_CHARS * 2),
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=Path("unused"),
+        result_jsonl=Path("unused.jsonl"),
+        save_video=False,
+        dry_run=True,
+    )
+    long_text = "error:" + ("z" * (MAX_METRIC_TEXT_FIELD_CHARS * 2))
+    long_key = "key:" + ("k" * (MAX_METRIC_TEXT_FIELD_CHARS * 2))
+    long_list = list(range(MAX_METRIC_COLLECTION_ITEMS + 20))
+    long_dict = {f"item-{index}": index for index in range(MAX_METRIC_COLLECTION_ITEMS + 20)}
+
+    record = make_record(
+        config,
+        run_id="run",
+        timestamp_utc="2026-01-01T00:00:00Z",
+        machine={
+            "nested": {
+                "detail": long_text,
+                long_key: "long key",
+                "long_list": long_list,
+                "long_dict": long_dict,
+            }
+        },
+        phase="total",
+        seconds=0.0,
+        error=long_text,
+    ).to_dict()
+
+    assert "<truncated>" in record["error"]
+    assert "<truncated>" in record["model_path"]
+    assert "<truncated>" in record["machine"]["nested"]["detail"]
+    assert len(record["error"]) <= MAX_METRIC_TEXT_FIELD_CHARS
+    assert any("<truncated>" in key for key in record["machine"]["nested"])
+    assert len(record["machine"]["nested"]["long_list"]) == MAX_METRIC_COLLECTION_ITEMS + 1
+    assert record["machine"]["nested"]["long_list"][-1] == {"__truncated_items__": True}
+    assert len(record["machine"]["nested"]["long_dict"]) == MAX_METRIC_COLLECTION_ITEMS + 1
+    assert record["machine"]["nested"]["long_dict"]["__truncated_items__"] is True
 
 
 def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():

@@ -78,6 +78,10 @@ Result/report readers must also remain bounded. JSONL benchmark result files
 may be appended over many runs, so report generation must reject input files
 above a fixed byte limit and stop before accumulating an excessive number of
 records in host memory.
+JSONL record serialization must also bound string fields, including nested
+guard context, so large exception messages or local paths cannot create
+unbounded result records. Nested metadata collections must also cap item counts
+before JSONL serialization.
 Report and CLI summary rendering must avoid propagating non-finite timings or
 unbounded text fields from malformed records into generated output.
 User-selected configuration files such as `--env-file` must also be capped

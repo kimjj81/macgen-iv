@@ -30,6 +30,8 @@ REQUIRED_PHASES = (
 
 DEFAULT_JSONL_READ_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_JSONL_READ_MAX_RECORDS = 100_000
+MAX_METRIC_TEXT_FIELD_CHARS = 2_048
+MAX_METRIC_COLLECTION_ITEMS = 256
 
 
 @dataclass(slots=True)
@@ -97,7 +99,7 @@ class MeasurementRecord:
     machine: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _bound_metric_value(asdict(self))
 
 
 def new_run_id() -> str:
@@ -183,6 +185,41 @@ def append_jsonl(path: Path, records: Iterable[MeasurementRecord]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
+
+
+def _bound_metric_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _bound_metric_text(value)
+    if isinstance(value, dict):
+        bounded: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_METRIC_COLLECTION_ITEMS:
+                bounded["__truncated_items__"] = True
+                break
+            bounded[_bound_metric_text(str(key))] = _bound_metric_value(item)
+        return bounded
+    if isinstance(value, list):
+        return _bound_metric_sequence(value)
+    if isinstance(value, tuple):
+        return _bound_metric_sequence(value)
+    return value
+
+
+def _bound_metric_text(value: str) -> str:
+    if len(value) <= MAX_METRIC_TEXT_FIELD_CHARS:
+        return value
+    suffix = "...<truncated>"
+    return value[: MAX_METRIC_TEXT_FIELD_CHARS - len(suffix)] + suffix
+
+
+def _bound_metric_sequence(value: Iterable[Any]) -> list[Any]:
+    bounded = []
+    for index, item in enumerate(value):
+        if index >= MAX_METRIC_COLLECTION_ITEMS:
+            bounded.append({"__truncated_items__": True})
+            break
+        bounded.append(_bound_metric_value(item))
+    return bounded
 
 
 def read_jsonl(
