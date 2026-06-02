@@ -295,10 +295,10 @@ def run_single(steps: int):
         label=f"{label} quality metrics",
     )
     result["video_shape"] = [FRAMES, HEIGHT, WIDTH, 3]
-    result["pixel_min"] = int(video.min())
-    result["pixel_max"] = int(video.max())
-    result["pixel_mean"] = round(float(video.mean()), 2)
-    result["pixel_std"] = round(float(video.std()), 2)
+    result["pixel_min"] = _video_pixel_stat_int(video, "min", label=label)
+    result["pixel_max"] = _video_pixel_stat_int(video, "max", label=label)
+    result["pixel_mean"] = round(_video_pixel_stat_float(video, "mean", label=label), 2)
+    result["pixel_std"] = round(_video_pixel_stat_float(video, "std", label=label), 2)
 
     # Save frames as PNG
     check_host_allocation_headroom(
@@ -384,6 +384,28 @@ def _video_frame_budget_bytes(video: Any, *, multiplier: int) -> int:
     if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
         reported_nbytes = 0
     return max(reported_nbytes, shape_floor) * multiplier
+
+
+def _video_pixel_stat_int(video: Any, metric: str, *, label: str) -> int:
+    try:
+        return int(getattr(video, metric)())
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
+            "aborting because host materialization state may be unsafe."
+        ) from exc
+
+
+def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
+    try:
+        return float(getattr(video, metric)())
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
+            "aborting because host materialization state may be unsafe."
+        ) from exc
 
 
 def run_child() -> int:

@@ -3466,6 +3466,35 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="denoise_step called before encode_text"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
+    def test_ltx23_latent_shape_rejects_unsafe_config_dimension_without_int_or_repr(self, tmp_path):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class UnsafeDimension:
+            def __int__(self):
+                raise AssertionError("config guard must not coerce unsafe dimensions with int()")
+
+            def __repr__(self):
+                raise AssertionError("config guard must not repr unsafe dimensions")
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=UnsafeDimension())
+        pipe.context_emb = types.SimpleNamespace(shape=(1, 4096))
+
+        with pytest.raises(RuntimeMemoryAbort, match=r"in_channels=<.*UnsafeDimension>"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
+
     def test_ltx23_denoise_preflights_intermediate_tensors_before_mx_array(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -4509,6 +4538,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (48, 1, 16, 16)
 
+        class FakeContext:
+            shape = (1, 1, 16)
+
         cleanup_calls: list[str] = []
         monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
         pipe = Wan22MLXPipeline(
@@ -4524,12 +4556,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.scheduler = types.SimpleNamespace(timesteps={0: 1})
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (48, 1, 16, 16)
         pipe.seq_len = 1
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
-        pipe.context_cond = object()
+        pipe.context_cond = FakeContext()
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
 
@@ -4586,6 +4618,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (16, 1, 32, 32)
 
+        class FakeContext:
+            shape = (2, 1, 16)
+
         pipe = Wan22MLXPipeline(
             model_path=tmp_path,
             seed=1,
@@ -4600,10 +4635,10 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.scheduler = types.SimpleNamespace(timesteps={0: 1})
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 32, 32)
         pipe.seq_len = 1
-        pipe.context_cfg = object()
+        pipe.context_cfg = FakeContext()
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
@@ -4620,6 +4655,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (48, 99, 1024, 1024)
 
+        class FakeContext:
+            shape = (2, 1, 16)
+
         pipe = Wan22MLXPipeline(
             model_path=tmp_path,
             seed=1,
@@ -4634,16 +4672,51 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         )
         pipe.model = object()
         pipe.scheduler = types.SimpleNamespace(timesteps=types.SimpleNamespace(tolist=lambda: [1]))
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (48, 1, 16, 16)
         pipe.seq_len = 1
-        pipe.context_cfg = object()
+        pipe.context_cfg = FakeContext()
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="latent shape .* expected"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=3.0, cache="none")
+
+    def test_wan22_denoise_rejects_context_shape_mismatch_before_mx_array(self, tmp_path):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeLatents:
+            shape = (48, 1, 16, 16)
+
+        class FakeContext:
+            shape = (2, 4096, 4096)
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            guidance=3.0,
+        )
+        pipe.mx = types.SimpleNamespace(
+            array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be rejected first")),
+        )
+        pipe.model = object()
+        pipe.scheduler = types.SimpleNamespace(timesteps={0: 1})
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
+        pipe.latent_shape = (48, 1, 16, 16)
+        pipe.seq_len = 1
+        pipe.context_cfg = FakeContext()
+        pipe.cross_kv = object()
+        pipe.rope_cos_sin = object()
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="context shape .* expected"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=3.0, cache="none")
 
     def test_wan22_denoise_requires_loaded_config_before_work(self, tmp_path):
@@ -5039,6 +5112,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (16, 1, 1, 1)
 
+        class FakeContext:
+            shape = (1, 1, 16)
+
         pipe = Wan22MLXPipeline(
             model_path=tmp_path,
             seed=1,
@@ -5050,12 +5126,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.mx = object()
         pipe.model = object()
         pipe.scheduler = object()
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 1, 1)
         pipe.seq_len = 1
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
-        pipe.context_cond = object()
+        pipe.context_cond = FakeContext()
 
         with patch(
             "fastgen_profiler.mlx_guard.check_runtime_memory",
@@ -5077,6 +5153,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (16, 1, 1, 1)
 
+        class FakeContext:
+            shape = (1 if guidance == 1.0 else 2, 1, 16)
+
         pipe = Wan22MLXPipeline(
             model_path=tmp_path,
             seed=1,
@@ -5089,7 +5168,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.mx = object()
         pipe.model = object()
         pipe.scheduler = object()
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 1, 1)
         pipe.seq_len = 1
         pipe.cross_kv = object()
@@ -5101,7 +5180,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="denoise_step called before encode_text"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=guidance, cache="none")
 
-        setattr(pipe, context_attr, object())
+        setattr(pipe, context_attr, FakeContext())
         with pytest.raises(AssertionError, match="memory check must not run"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=guidance, cache="none")
 
@@ -5128,6 +5207,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (16, 1, 1, 1)
 
+        class FakeContext:
+            shape = (1, 1, 16)
+
         cleanup_calls: list[str] = []
         monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
 
@@ -5142,11 +5224,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.mx = object()
         pipe.model = object()
         pipe.scheduler = object()
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 1, 1)
         pipe.seq_len = 1
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
+        pipe.context_cond = FakeContext()
         pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
             AssertionError("memory check must not run for invalid denoise arguments")
         )
@@ -5173,6 +5256,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         class FakeLatents:
             shape = (16, 1, 1, 1)
 
+        class FakeContext:
+            shape = (1, 1, 16)
+
         cleanup_calls: list[str] = []
         monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
 
@@ -5187,11 +5273,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.mx = object()
         pipe.model = object()
         pipe.scheduler = object()
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 1, 1)
         pipe.seq_len = 1
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
+        pipe.context_cond = FakeContext()
         pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
             AssertionError("memory check must not run for invalid denoise arguments")
         )
@@ -5234,6 +5321,9 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             def __getitem__(self, key):
                 return self
 
+        class FakeContext:
+            shape = (1, 1, 16)
+
         class FakeModel:
             def __call__(self, *args, **kwargs):
                 return [FakeLatents()]
@@ -5249,12 +5339,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe.mx = FakeMX()
         pipe.model = FakeModel()
         pipe.scheduler = FakeScheduler()
-        pipe.config = object()
+        pipe.config = types.SimpleNamespace(text_len=1, text_dim=16)
         pipe.latent_shape = (16, 1, 1, 1)
         pipe.seq_len = 1
         pipe.cross_kv = object()
         pipe.rope_cos_sin = object()
-        pipe.context_cond = object()
+        pipe.context_cond = FakeContext()
         pipe.cfg_disabled = True
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
@@ -7810,6 +7900,16 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 pipe.load_model()
 
         limits.assert_not_called()
+
+    def test_wan22_positive_int_rejects_unsafe_config_dimension_without_repr(self):
+        from fastgen_profiler.backends.wan22_mlx_adapter import _positive_int
+
+        class UnsafeDimension:
+            def __repr__(self):
+                raise AssertionError("config guard must not repr unsafe dimensions")
+
+        with pytest.raises(RuntimeMemoryAbort, match=r"unsafe=<.*UnsafeDimension>"):
+            _positive_int(UnsafeDimension(), "unsafe")
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),

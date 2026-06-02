@@ -217,7 +217,11 @@ class LTX23MLXPipeline:
             self._check_host_allocation(total * 4, phase)
 
     def _expected_latent_shape(self) -> tuple[int, int, int, int, int]:
-        channels = int(self.config.in_channels) if self.config is not None else 128
+        channels = (
+            _positive_structural_int(self.config.in_channels, "in_channels")
+            if self.config is not None
+            else 128
+        )
         return (1, channels, self.frames, _latent_grid(self.height), _latent_grid(self.width))
 
     def _validate_latent_init_shape(self, *, width: int, height: int, frames: int) -> None:
@@ -1156,7 +1160,7 @@ def _positive_structural_int(value: Any, key: str) -> int:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
-            f"LTX2.3 config field {key}={value!r} must be a positive structural dimension; "
+            f"LTX2.3 config field {key}={_shape_dim_text(value)} must be a positive structural dimension; "
             "refusing to construct MLX model"
         )
     result = value

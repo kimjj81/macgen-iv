@@ -181,7 +181,8 @@ class Wan22MLXPipeline:
         for name, value in (("elements", elements), ("multiplier", multiplier)):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise MemoryGuardError(
-                    f"Memory guard [wan2.2 {phase}]: {name} must be a positive integer, got {value!r}"
+                    f"Memory guard [wan2.2 {phase}]: {name} must be a positive integer, "
+                    f"got {_shape_dim_text(value)}"
                 )
         self._check_host_allocation(elements * 4 * multiplier, phase)
 
@@ -215,6 +216,31 @@ class Wan22MLXPipeline:
             raise RuntimeError(
                 f"Wan2.2 latent shape {actual} does not match expected {expected} for {phase}"
             )
+
+    def _expected_context_shape(self) -> tuple[int, int, int]:
+        if self.config is None:
+            raise RuntimeError("context shape validation called before load_model")
+        batch = 1 if self.cfg_disabled else 2
+        text_len = _positive_int(self.config.text_len, "text_len")
+        text_dim = _positive_int(
+            getattr(
+                self.config,
+                "text_dim",
+                getattr(self.config, "dim", getattr(self.config, "hidden_size", 4096)),
+            ),
+            "text_dim",
+        )
+        return (batch, text_len, text_dim)
+
+    def _validate_context_shape(self, context: Any, phase: str) -> tuple[int, int, int]:
+        expected = self._expected_context_shape()
+        actual = _bounded_shape_tuple(context, expected_rank=len(expected), label=f"Wan2.2 context {phase}")
+        if actual != expected:
+            raise RuntimeError(
+                f"Wan2.2 context shape {actual} does not match expected {expected} for {phase}; "
+                "refusing to run transformer with unexpected text conditioning memory"
+            )
+        return expected
 
     def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
         if not isinstance(steps, int) or isinstance(steps, bool):
@@ -581,11 +607,13 @@ class Wan22MLXPipeline:
 
         try:
             self._validate_latents_shape(latents, phase)
+            context = self.context_cond if self.cfg_disabled else self.context_cfg
+            context_shape = self._validate_context_shape(context, phase)
             self._check_memory(f"{phase} before")
             timestep_val = self.scheduler.timesteps[step_index]
             cfg_factor = 1 if self.cfg_disabled else 2
             self._check_mlx_tensor_floor(
-                math.prod(self.latent_shape) * cfg_factor,
+                math.prod(self.latent_shape) * cfg_factor + math.prod(context_shape),
                 f"{phase} tensors",
                 multiplier=8,
             )
@@ -867,7 +895,7 @@ def _positive_int(value: Any, key: str, *, max_value: int | None = None) -> int:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
-            f"Wan2.2 config field {key}={value!r} must be a positive integer; "
+            f"Wan2.2 config field {key}={_shape_dim_text(value)} must be a positive integer; "
             "refusing to construct MLX model"
         )
     result = value
@@ -980,7 +1008,7 @@ def _non_negative_int(value: Any, key: str, *, max_value: int | None = None) -> 
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
         raise RuntimeMemoryAbort(
-            f"Wan2.2 config field {key}={value!r} must be zero or a positive integer; "
+            f"Wan2.2 config field {key}={_shape_dim_text(value)} must be zero or a positive integer; "
             "refusing to construct MLX model"
         )
     result = value
