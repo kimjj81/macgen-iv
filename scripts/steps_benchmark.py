@@ -377,22 +377,25 @@ def run_child() -> int:
         result_path = _child_result_path_from_env()
         steps = _positive_int_value(CHILD_STEP_ENV, os.environ[CHILD_STEP_ENV])
     except (KeyError, MemoryGuardError) as exc:
-        print(f"  [guard] child BLOCKED: invalid child environment: {exc}")
+        error = _safe_exception_text(exc)
+        print(f"  [guard] child BLOCKED: invalid child environment: {error}")
         return 1
     try:
         result = run_single(steps)
     except MemoryGuardError as e:
-        print(f"  [guard] steps={steps} BLOCKED: {e}")
-        result = {"steps": steps, "error": str(e), "skipped": True, "guard_blocked": True}
+        error = _safe_exception_text(e)
+        print(f"  [guard] steps={steps} BLOCKED: {error}")
+        result = {"steps": steps, "error": error, "skipped": True, "guard_blocked": True}
     except RuntimeMemoryAbort as e:
-        print(f"  [guard] steps={steps} ABORTED: {e}")
-        result = {"steps": steps, "error": str(e), "aborted": True}
+        error = _safe_exception_text(e)
+        print(f"  [guard] steps={steps} ABORTED: {error}")
+        result = {"steps": steps, "error": error, "aborted": True}
         result["cleanup"] = mlx_cleanup()
     except Exception as e:
-        print(f"  steps={steps} FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        result = {"steps": steps, "error": str(e)}
+        error = _safe_exception_text(e)
+        print(f"  steps={steps} FAILED: {error}")
+        print("  [guard] traceback suppressed to avoid unbounded exception formatting")
+        result = {"steps": steps, "error": error}
         result["cleanup"] = mlx_cleanup()
 
     temp_result_path = result_path.with_suffix(result_path.suffix + ".tmp")
@@ -539,6 +542,21 @@ def _safe_steps_text(value: Any) -> str:
     return _bound_steps_text(f"<{value_type.__module__}.{value_type.__qualname__}>")
 
 
+def _safe_exception_text(exc: BaseException) -> str:
+    exc_type = type(exc)
+    parts = []
+    for index, arg in enumerate(exc.args):
+        if index >= STEPS_RESULT_COLLECTION_MAX_ITEMS:
+            parts.append("...<truncated>")
+            break
+        parts.append(_safe_steps_text(arg))
+    if not parts:
+        return _bound_steps_text(f"<{exc_type.__module__}.{exc_type.__qualname__}>")
+    if len(parts) == 1:
+        return parts[0]
+    return _bound_steps_text(f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}")
+
+
 def _bound_steps_text(value: str) -> str:
     if len(value) <= STEPS_RESULT_TEXT_FIELD_MAX_CHARS:
         return value
@@ -629,16 +647,18 @@ def main():
                 recovery = parent_inter_child_recovery(label=f"pre-steps_{steps}")
                 print(f"  [guard] parent recovery: free={recovery.get('free_gb', '?')}GB")
             except MemoryGuardError as e:
-                print(f"  [guard] SKIPPING steps={steps}: {e}")
-                all_results.append({"steps": steps, "error": str(e), "skipped": True})
+                error = _safe_exception_text(e)
+                print(f"  [guard] SKIPPING steps={steps}: {error}")
+                all_results.append({"steps": steps, "error": error, "skipped": True})
                 continue
         elif run_counter() > 0:
             try:
                 recovery = parent_inter_child_recovery(label=f"pre-steps_{steps}")
                 print(f"  [guard] recovery: free={recovery.get('free_gb', '?')}GB")
             except MemoryGuardError as e:
-                print(f"  [guard] SKIPPING steps={steps}: {e}")
-                all_results.append({"steps": steps, "error": str(e), "skipped": True})
+                error = _safe_exception_text(e)
+                print(f"  [guard] SKIPPING steps={steps}: {error}")
+                all_results.append({"steps": steps, "error": error, "skipped": True})
                 continue
 
         # Check if process should restart to avoid Metal leak accumulation
@@ -669,18 +689,20 @@ def main():
                 )
                 break
         except MemoryGuardError as e:
-            print(f"  [guard] steps={steps} BLOCKED: {e}")
-            all_results.append({"steps": steps, "error": str(e), "skipped": True})
+            error = _safe_exception_text(e)
+            print(f"  [guard] steps={steps} BLOCKED: {error}")
+            all_results.append({"steps": steps, "error": error, "skipped": True})
         except RuntimeMemoryAbort as e:
-            print(f"  [guard] steps={steps} ABORTED: {e}")
-            all_results.append({"steps": steps, "error": str(e), "aborted": True})
+            error = _safe_exception_text(e)
+            print(f"  [guard] steps={steps} ABORTED: {error}")
+            all_results.append({"steps": steps, "error": error, "aborted": True})
             increment_run_counter()
             mlx_cleanup()
         except Exception as e:
-            print(f"  steps={steps} FAILED: {e}")
-            import traceback
-            traceback.print_exc()
-            all_results.append({"steps": steps, "error": str(e)})
+            error = _safe_exception_text(e)
+            print(f"  steps={steps} FAILED: {error}")
+            print("  [guard] traceback suppressed to avoid unbounded exception formatting")
+            all_results.append({"steps": steps, "error": error})
             # Treat unknown failures as a consumed MLX process slot: the error
             # may have happened after Metal state was initialized.
             increment_run_counter()

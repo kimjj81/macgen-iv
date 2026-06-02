@@ -432,6 +432,46 @@ def test_steps_benchmark_summarizes_unknown_result_values_without_repr_or_str(tm
     assert "UnsafeValue" in cleanup[key]
 
 
+def test_steps_benchmark_child_summarizes_exceptions_without_str_or_traceback(tmp_path, monkeypatch, capsys):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_exception_summary_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    result_path = tmp_path / "steps" / "child.json"
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_RESULT", str(result_path))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_STEP", "1")
+    spec.loader.exec_module(module)
+
+    class UnsafeArg:
+        def __repr__(self):
+            raise AssertionError("exception arg repr must not be called")
+
+        def __str__(self):
+            raise AssertionError("exception arg str must not be called")
+
+    class UnsafeException(Exception):
+        def __str__(self):
+            raise AssertionError("exception str must not be called")
+
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(UnsafeException(UnsafeArg())),
+    )
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: {})
+
+    assert module.run_child() == 0
+
+    output = capsys.readouterr().out
+    assert "traceback suppressed" in output
+    record = json.loads(result_path.read_text(encoding="utf-8"))
+    assert "UnsafeArg" in record["error"]
+
+
 def test_steps_benchmark_child_rejects_invalid_step_env(tmp_path, monkeypatch):
     import importlib.util
 
@@ -923,6 +963,44 @@ def test_steps_benchmark_generic_failure_consumes_process_slot(tmp_path, monkeyp
         for line in module.RESULTS_JSONL.read_text(encoding="utf-8").splitlines()
     ]
     assert records == [{"steps": 1, "error": "metal state unknown"}]
+
+
+def test_steps_benchmark_generic_failure_does_not_stringify_unsafe_exception(tmp_path, monkeypatch, capsys):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_unsafe_exception_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_VALUES", "1")
+    spec.loader.exec_module(module)
+
+    class UnsafeError(Exception):
+        def __str__(self):
+            raise AssertionError("steps benchmark must not call str on exceptions")
+
+    monkeypatch.setattr(module, "run_counter", lambda: 0)
+    monkeypatch.setattr(module, "should_restart_process", lambda: False)
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(UnsafeError("metal state unknown")),
+    )
+    monkeypatch.setattr(module, "increment_run_counter", lambda: 1)
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: {"freed_gb": 0})
+
+    assert module.main() == 1
+
+    captured = capsys.readouterr()
+    assert "traceback suppressed" in captured.out
+    records = [
+        json.loads(line)
+        for line in module.RESULTS_JSONL.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["steps"] == 1
+    assert records[0]["error"] == "metal state unknown"
 
 
 def test_steps_benchmark_rejects_unexpected_video_shape_before_png_save(tmp_path, monkeypatch):
