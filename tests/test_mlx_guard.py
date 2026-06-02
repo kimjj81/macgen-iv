@@ -540,6 +540,50 @@ class TestCheckRuntimeMemory:
 
         mock_cleanup.assert_called_once()
 
+    def test_runtime_abort_fails_closed_when_cleanup_raises_on_low_memory(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        cleanup_errors: list[BaseException] = []
+        ref: weakref.ReferenceType[object] | None = None
+
+        def cleanup():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            exc = RuntimeError("cleanup failed with heavy local")
+            cleanup_errors.append(exc)
+            raise exc
+
+        monkeypatch.setattr(
+            mlx_guard,
+            "system_snapshot",
+            lambda: SystemSnapshot(
+                free_bytes=1 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.7,
+                swap_files=10,
+                free_fraction=1 / 128,
+            ),
+        )
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(RuntimeMemoryAbort, match="only .*GB free") as caught:
+            check_runtime_memory(label="step-low")
+
+        gc.collect()
+        assert "MLX cleanup also failed: <builtins.RuntimeError>" in str(caught.value)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert ref is not None
+        assert ref() is None
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
+
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_runtime_fails_closed_when_system_snapshot_raises(self, mock_snap, mock_cleanup):
@@ -583,6 +627,43 @@ class TestCheckRuntimeMemory:
             check_runtime_memory(label="mlx-limit")
 
         mock_cleanup.assert_called_once()
+
+    def test_runtime_mlx_limit_abort_fails_closed_when_cleanup_raises(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        cleanup_errors: list[BaseException] = []
+        ref: weakref.ReferenceType[object] | None = None
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setattr(mx, "get_active_memory", lambda: 900)
+        monkeypatch.setattr(mx, "get_cache_memory", lambda: 30)
+        monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", 1000)
+
+        def cleanup():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            exc = RuntimeError("cleanup failed with heavy local")
+            cleanup_errors.append(exc)
+            raise exc
+
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX active\\+cache memory") as caught:
+            check_runtime_memory(label="mlx-limit")
+
+        gc.collect()
+        assert "MLX cleanup also failed: <builtins.RuntimeError>" in str(caught.value)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert ref is not None
+        assert ref() is None
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
 
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_mlx_memory_below_configured_limit_passes(self, mock_snap, monkeypatch):
@@ -1626,6 +1707,50 @@ class TestAllocationBudget:
 
         with pytest.raises(RuntimeMemoryAbort, match="host allocation"):
             check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+    def test_host_allocation_abort_fails_closed_when_cleanup_raises(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        cleanup_errors: list[BaseException] = []
+        ref: weakref.ReferenceType[object] | None = None
+
+        def cleanup():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            exc = RuntimeError("cleanup failed with heavy local")
+            cleanup_errors.append(exc)
+            raise exc
+
+        monkeypatch.setattr(
+            mlx_guard,
+            "system_snapshot",
+            lambda: SystemSnapshot(
+                free_bytes=9 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.2,
+                swap_files=0,
+                free_fraction=9 / 128,
+            ),
+        )
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(RuntimeMemoryAbort, match="host allocation") as caught:
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        gc.collect()
+        assert "MLX cleanup also failed: <builtins.RuntimeError>" in str(caught.value)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert ref is not None
+        assert ref() is None
+        assert cleanup_errors[0].__traceback__ is None
+        assert cleanup_errors[0].__cause__ is None
+        assert cleanup_errors[0].__context__ is None
 
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_host_allocation_reserve_env_cannot_lower_default(self, mock_snap, monkeypatch):

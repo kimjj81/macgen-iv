@@ -419,6 +419,19 @@ def _cleanup_after_exception(exc: BaseException | None = None) -> dict[str, obje
     return cleanup
 
 
+def _runtime_abort_after_cleanup(message: str) -> RuntimeMemoryAbort:
+    cleanup_error = None
+    try:
+        mlx_cleanup()
+    except Exception as cleanup_exc:
+        cleanup_error = _safe_diagnostic_value(cleanup_exc)
+        _clear_exception_traceback_frames(cleanup_exc)
+        _detach_exception(cleanup_exc)
+    if cleanup_error is not None:
+        message += f" MLX cleanup also failed: {cleanup_error}."
+    return RuntimeMemoryAbort(message)
+
+
 def _detach_exception(exc: BaseException | None) -> None:
     if exc is None:
         return
@@ -778,39 +791,33 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
 
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(_invalid_system_snapshot_message(label, invalid_reasons))
+        raise _runtime_abort_after_cleanup(_invalid_system_snapshot_message(label, invalid_reasons))
 
     if sys.platform == "darwin" and snap.free_bytes is None:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: cannot read vm_stat free memory "
             "during MLX/Metal run. Aborting because free memory telemetry is unavailable."
         )
     if sys.platform == "darwin" and snap.swap_files is None:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: cannot read macOS swap file state "
             "during MLX/Metal run. Aborting because swap telemetry is unavailable."
         )
     if sys.platform == "darwin" and snap.pressure is None:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: cannot read macOS memory pressure "
             "during MLX/Metal run. Aborting because pressure telemetry is unavailable."
         )
 
     if snap.free_bytes is not None and snap.free_bytes < RUNTIME_MIN_FREE_BYTES:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: only {snap.free_gb()}GB free "
             f"(threshold {RUNTIME_MIN_FREE_BYTES / 1e9:.0f}GB). "
             "Aborting run to prevent kernel watchdog timeout."
         )
 
     if snap.pressure is not None and snap.pressure > RUNTIME_PRESSURE_ABORT_THRESHOLD:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: pressure at {snap.pressure * 100:.0f}% "
             f"(threshold {RUNTIME_PRESSURE_ABORT_THRESHOLD * 100:.0f}%). "
             "Aborting run to prevent kernel watchdog timeout."
@@ -840,8 +847,7 @@ def _check_mlx_runtime_limit(label: str) -> None:
     used = active + cache
     threshold = int(_current_mlx_memory_limit_bytes * RUNTIME_MLX_LIMIT_ABORT_FRACTION)
     if used >= threshold:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: MLX active+cache memory "
             f"{used / 1e9:.1f}GB is above {RUNTIME_MLX_LIMIT_ABORT_FRACTION * 100:.0f}% "
             f"of configured limit {_current_mlx_memory_limit_bytes / 1e9:.1f}GB."
@@ -883,40 +889,34 @@ def check_host_allocation_headroom(
     required_with_reserve = required_bytes + reserve_bytes
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(_invalid_system_snapshot_message(label, invalid_reasons))
+        raise _runtime_abort_after_cleanup(_invalid_system_snapshot_message(label, invalid_reasons))
 
     if sys.platform == "darwin" and snap.swap_files is None:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: cannot read macOS swap file state before "
             f"allocating {required_bytes / 1e9:.1f}GB on host."
         )
     if sys.platform == "darwin" and snap.pressure is None:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: cannot read macOS memory pressure before "
             f"allocating {required_bytes / 1e9:.1f}GB on host."
         )
     if snap.free_bytes is None:
         if sys.platform == "darwin":
-            mlx_cleanup()
-            raise RuntimeMemoryAbort(
+            raise _runtime_abort_after_cleanup(
                 f"Runtime memory abort [{label}]: cannot read free memory before "
                 f"allocating {required_bytes / 1e9:.1f}GB on host."
             )
         return snap
 
     if snap.pressure is not None and snap.pressure > RUNTIME_PRESSURE_ABORT_THRESHOLD:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: pressure at {snap.pressure * 100:.0f}% "
             f"before allocating {required_bytes / 1e9:.1f}GB on host."
         )
 
     if snap.free_bytes < required_with_reserve:
-        mlx_cleanup()
-        raise RuntimeMemoryAbort(
+        raise _runtime_abort_after_cleanup(
             f"Runtime memory abort [{label}]: need {required_bytes / 1e9:.1f}GB "
             f"host allocation plus {reserve_bytes / 1e9:.1f}GB reserve, "
             f"only {snap.free_gb()}GB free."
