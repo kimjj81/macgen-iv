@@ -535,6 +535,160 @@ def test_mlx_runtime_abort_records_cleanup_status(tmp_path, monkeypatch):
     }
 
 
+def test_mlx_run_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "benchmarks.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: {
+            "cleanup": {
+                "mlx_loaded": True,
+                "mlx_cache_cleared": False,
+                "mlx_cleanup_error": "failed to clear MLX cache",
+            },
+            "run_number": 1,
+        },
+    )
+
+    def fake_run(self, config):
+        return [
+            cli_module.make_record(
+                config,
+                run_id="run",
+                timestamp_utc="2026-01-01T00:00:00Z",
+                machine={},
+                phase="total",
+                seconds=0.0,
+            )
+        ]
+
+    monkeypatch.setattr(cli_module.Profiler, "run", fake_run)
+
+    exit_code = main(
+        [
+            "run",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "mlx cleanup",
+            "--negative-prompt",
+            "",
+            "--seed",
+            "3",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--frames",
+            "4",
+            "--fps",
+            "4",
+            "--steps",
+            "1",
+            "--guidance",
+            "1.0",
+            "--quant",
+            "none",
+            "--cache",
+            "none",
+            "--compile",
+            "off",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--no-save-video",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["phase"] == "total"
+    assert records[0]["error"] == (
+        "Memory guard blocked run: MLX post-run cleanup failed: failed to clear MLX cache"
+    )
+    assert records[0]["machine"]["mlx_guard_cleanup"] == {
+        "mlx_loaded": True,
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": "failed to clear MLX cache",
+    }
+
+
+def test_mlx_profile_cleanup_failure_fails_closed_after_success(tmp_path, monkeypatch):
+    jsonl_path = tmp_path / "mlx-profile.jsonl"
+    model_path = tmp_path / "wan-model"
+    model_path.mkdir()
+    monkeypatch.setattr(cli_module, "_backend_is_scaffold_only", lambda backend: False)
+    monkeypatch.setattr(cli_module, "_mlx_pre_run_guard", lambda label, config=None: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_mlx_post_run_cleanup",
+        lambda label: {
+            "cleanup": {
+                "mlx_loaded": True,
+                "mlx_cache_cleared": False,
+                "mlx_cleanup_error": "failed to clear MLX cache",
+            },
+            "run_number": 1,
+        },
+    )
+
+    def fake_run(self, config):
+        return [
+            cli_module.make_record(
+                config,
+                run_id="profile-run",
+                timestamp_utc="2026-01-01T00:00:00Z",
+                machine={},
+                phase="total",
+                seconds=0.0,
+            )
+        ]
+
+    monkeypatch.setattr(cli_module.Profiler, "run", fake_run)
+
+    exit_code = main(
+        [
+            "profile",
+            "--model",
+            "wan2.2",
+            "--backend",
+            "mlx",
+            "--model-path",
+            str(model_path),
+            "--prompt",
+            "profile cleanup",
+            "--seed",
+            "12",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--result-jsonl",
+            str(jsonl_path),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 1
+    records = _read_jsonl(jsonl_path)
+    assert records[0]["phase"] == "total"
+    assert records[0]["error"] == (
+        "Memory guard blocked run: MLX post-run cleanup failed: failed to clear MLX cache"
+    )
+    assert records[0]["machine"]["mlx_guard_cleanup"] == {
+        "mlx_loaded": True,
+        "mlx_cache_cleared": False,
+        "mlx_cleanup_error": "failed to clear MLX cache",
+    }
+
+
 def test_mlx_inner_memory_guard_error_records_cleanup_status(tmp_path, monkeypatch):
     from fastgen_profiler.mlx_guard import MemoryGuardError
 

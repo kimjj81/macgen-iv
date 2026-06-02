@@ -35,6 +35,8 @@ before importing `mlx.core` or `mlx_video` model modules.
 MLX caches when `mlx.core` is already loaded in the current process.
 Cleanup must return a status record even when free-memory telemetry fails; an
 abort path must not be converted into an unhandled cleanup exception.
+If cleanup reports that loaded MLX state was not cleared, the run must fail
+closed instead of treating the preceding model work as successful.
 Synchronization helpers must follow the same rule: calling `synchronize()` or
 `synchronize_mlx()` must not import `mlx.core` or configure MLX limits in a
 process that has not already loaded MLX for real model work.
@@ -65,6 +67,10 @@ and clean up; unknown memory state during MLX/Metal work is unsafe.
 Large host allocation preflights must follow the same macOS telemetry rule:
 unknown pressure or swap telemetry, or critical pressure, must abort before
 large file reads, tensor materialization, NumPy conversion, or video encoding.
+Result/report readers must also remain bounded. JSONL benchmark result files
+may be appended over many runs, so report generation must reject input files
+above a fixed byte limit and stop before accumulating an excessive number of
+records in host memory.
 Video postprocess and frame export preflights must reserve more than the input
 frame buffer because lower-level encoders and image writers may allocate
 contiguous, converted, or temporary buffers outside MLX allocator counters.

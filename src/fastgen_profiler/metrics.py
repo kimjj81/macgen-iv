@@ -28,6 +28,9 @@ REQUIRED_PHASES = (
     "total",
 )
 
+DEFAULT_JSONL_READ_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_JSONL_READ_MAX_RECORDS = 100_000
+
 
 @dataclass(slots=True)
 class RunConfig:
@@ -182,13 +185,32 @@ def append_jsonl(path: Path, records: Iterable[MeasurementRecord]) -> None:
             handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
+def read_jsonl(
+    path: Path,
+    *,
+    max_bytes: int = DEFAULT_JSONL_READ_MAX_BYTES,
+    max_records: int = DEFAULT_JSONL_READ_MAX_RECORDS,
+) -> list[dict[str, Any]]:
+    if max_bytes <= 0:
+        raise ValueError("JSONL read byte limit must be positive")
+    if max_records <= 0:
+        raise ValueError("JSONL read record limit must be positive")
+    file_size = path.stat().st_size
+    if file_size > max_bytes:
+        raise ValueError(
+            f"{path} exceeds JSONL read limit: {file_size} bytes > {max_bytes} bytes"
+        )
+
     records: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
+            if len(records) >= max_records:
+                raise ValueError(
+                    f"{path} exceeds JSONL record limit: more than {max_records} records"
+                )
             try:
                 records.append(json.loads(stripped))
             except json.JSONDecodeError as exc:

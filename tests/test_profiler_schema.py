@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 from fastgen_profiler.backends import create_backend
-from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig, machine_metadata
+from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig, machine_metadata, read_jsonl
 from fastgen_profiler.profiler import Profiler
 
 
@@ -99,3 +99,27 @@ def test_machine_metadata_does_not_import_mlx(monkeypatch):
     assert "python_version" in metadata
     assert "mlx" not in sys.modules
     assert "mlx.core" not in sys.modules
+
+
+def test_read_jsonl_rejects_file_larger_than_limit(tmp_path):
+    path = tmp_path / "oversized.jsonl"
+    path.write_text('{"phase":"total"}\n{"phase":"denoise_step"}\n', encoding="utf-8")
+
+    try:
+        read_jsonl(path, max_bytes=8)
+    except ValueError as exc:
+        assert "exceeds JSONL read limit" in str(exc)
+    else:
+        raise AssertionError("read_jsonl should reject oversized input files")
+
+
+def test_read_jsonl_rejects_more_records_than_limit(tmp_path):
+    path = tmp_path / "too-many-records.jsonl"
+    path.write_text('{"phase":"total"}\n{"phase":"denoise_step"}\n', encoding="utf-8")
+
+    try:
+        read_jsonl(path, max_records=1)
+    except ValueError as exc:
+        assert "exceeds JSONL record limit" in str(exc)
+    else:
+        raise AssertionError("read_jsonl should reject excessive record counts")

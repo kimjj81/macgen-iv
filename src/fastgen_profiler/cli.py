@@ -344,6 +344,10 @@ def run_command(options: RunOptions) -> int:
         finally:
             if mlx_runtime_required:
                 cleanup_status = _mlx_post_run_cleanup(config.variant_label or "manual")
+        cleanup_error = _mlx_cleanup_failure_error(cleanup_status) if mlx_runtime_required else None
+        if cleanup_error is not None and not guard_failed and not memory_aborted:
+            guard_failed = True
+            guard_error = cleanup_error
         if guard_failed:
             records = _error_records_for_config(
                 config,
@@ -485,6 +489,20 @@ def _mlx_post_run_cleanup(label: str) -> dict[str, object] | None:
             },
             "run_number": None,
         }
+
+
+def _mlx_cleanup_failure_error(cleanup_status: dict[str, object] | None) -> str | None:
+    if cleanup_status is None:
+        return "Memory guard blocked run: MLX post-run cleanup did not return status"
+    cleanup = cleanup_status.get("cleanup")
+    if not isinstance(cleanup, dict):
+        return "Memory guard blocked run: MLX post-run cleanup returned invalid status"
+    cleanup_error = cleanup.get("mlx_cleanup_error")
+    if cleanup_error:
+        return f"Memory guard blocked run: MLX post-run cleanup failed: {cleanup_error}"
+    if cleanup.get("mlx_loaded") is True and cleanup.get("mlx_cache_cleared") is False:
+        return "Memory guard blocked run: MLX post-run cleanup did not clear loaded MLX cache"
+    return None
 
 
 def _adaptive_adjust_spec(
@@ -674,6 +692,11 @@ def profile_command(options: RunOptions) -> int:
                 snap = cleanup_status.get("snapshot") if cleanup_status is not None else None
                 if snap is not None:
                     adaptive_state["last_snapshot"] = snap
+        cleanup_error = _mlx_cleanup_failure_error(cleanup_status) if mlx_runtime_required else None
+        if cleanup_error is not None and not guard_failed and not memory_aborted:
+            guard_failed = True
+            memory_guard_failed = True
+            guard_error = cleanup_error
         if guard_failed:
             records = _profile_error_records(
                 options=options,
