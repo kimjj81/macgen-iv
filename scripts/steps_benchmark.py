@@ -41,6 +41,13 @@ from fastgen_profiler.mlx_guard import (
 
 
 PNG_FRAME_ALLOCATION_MULTIPLIER = 4
+VIDEO_STATS_ALLOCATION_MULTIPLIER = 4
+MAX_DIMENSION = 4096
+MAX_FRAMES = 257
+MAX_FPS = 240
+MAX_STEPS = 512
+MAX_STEP_VALUES = 16
+MAX_CHILD_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -64,6 +71,20 @@ def _positive_int_value(name: str, raw: str) -> int:
         raise MemoryGuardError(f"{name} must be a positive integer, got {raw!r}") from exc
     if value <= 0:
         raise MemoryGuardError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def _env_step_values(name: str, default: str) -> list[int]:
+    raw_values = [value.strip() for value in os.environ.get(name, default).split(",") if value.strip()]
+    if len(raw_values) > MAX_STEP_VALUES:
+        raise MemoryGuardError(f"{name} may contain at most {MAX_STEP_VALUES} values")
+    return [_capped_positive_int_value(name, value, MAX_STEPS) for value in raw_values]
+
+
+def _capped_positive_int_value(name: str, raw: str, max_value: int) -> int:
+    value = _positive_int_value(name, raw)
+    if value > max_value:
+        raise MemoryGuardError(f"{name} must be no greater than {max_value}, got {value}")
     return value
 
 
@@ -91,23 +112,23 @@ PROMPT = os.environ.get(
     "A golden retriever running through a sunlit meadow, cinematic, slow motion",
 )
 NEGATIVE_PROMPT = os.environ.get("FASTGEN_STEPS_NEGATIVE_PROMPT", "")
-WIDTH = _env_positive_int("FASTGEN_STEPS_WIDTH", 512)
-HEIGHT = _env_positive_int("FASTGEN_STEPS_HEIGHT", 512)
-FRAMES = _env_positive_int("FASTGEN_STEPS_FRAMES", 9)
-FPS = _env_positive_int("FASTGEN_STEPS_FPS", 24)
+WIDTH = _env_capped_positive_int("FASTGEN_STEPS_WIDTH", 512, MAX_DIMENSION)
+HEIGHT = _env_capped_positive_int("FASTGEN_STEPS_HEIGHT", 512, MAX_DIMENSION)
+FRAMES = _env_capped_positive_int("FASTGEN_STEPS_FRAMES", 9, MAX_FRAMES)
+FPS = _env_capped_positive_int("FASTGEN_STEPS_FPS", 24, MAX_FPS)
 SEED = int(os.environ.get("FASTGEN_STEPS_SEED", "42"))
-STEP_VALUES = [
-    _positive_int_value("FASTGEN_STEPS_VALUES", value.strip())
-    for value in os.environ.get("FASTGEN_STEPS_VALUES", "1").split(",")
-    if value.strip()
-]
+STEP_VALUES = _env_step_values("FASTGEN_STEPS_VALUES", "1")
 ALLOW_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_HEAVY") == "1"
 ALLOW_MULTIPLE_HEAVY = os.environ.get("FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY") == "1"
 RESULTS_JSONL = OUTPUT_BASE / "results.jsonl"
 CHILD_MODE_ENV = "FASTGEN_STEPS_CHILD"
 CHILD_STEP_ENV = "FASTGEN_STEPS_CHILD_STEP"
 CHILD_RESULT_ENV = "FASTGEN_STEPS_CHILD_RESULT"
-CHILD_TIMEOUT_SECONDS = _env_positive_int("FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS", 60 * 60)
+CHILD_TIMEOUT_SECONDS = _env_capped_positive_int(
+    "FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS",
+    60 * 60,
+    MAX_CHILD_TIMEOUT_SECONDS,
+)
 CHILD_IO_MAX_BYTES = 1024 * 1024
 CHILD_LOG_TAIL_BYTES = _env_capped_positive_int(
     "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES",
@@ -236,6 +257,10 @@ def run_single(steps: int):
     result["vae_decode_s"] = round(t1 - t0, 2)
 
     # Quality metrics
+    check_host_allocation_headroom(
+        video.nbytes * VIDEO_STATS_ALLOCATION_MULTIPLIER,
+        label=f"{label} quality metrics",
+    )
     result["video_shape"] = list(video.shape)
     result["pixel_min"] = int(video.min())
     result["pixel_max"] = int(video.max())

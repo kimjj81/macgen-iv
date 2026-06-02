@@ -107,7 +107,10 @@ Direct benchmark scripts must be safe by default.
   backend adapter has completed local model config and asset preflight.
 - Safety-related numeric environment variables, including shape, timeout, log
   tail, and child-result limits, must be parsed as positive integers. Invalid
-  or non-positive values must fail closed instead of weakening a guard.
+  or non-positive values must fail closed instead of weakening a guard. Shape,
+  step-count, FPS, timeout, and child I/O overrides must also have hard caps so
+  malformed direct-script invocations cannot request unbounded control
+  structures or obviously unsafe MLX workloads before guard checks.
 - Child-mode environment variables must also be validated: the step count must
   be positive, and the child result path must remain inside the configured
   output directory.

@@ -68,6 +68,36 @@ def test_steps_benchmark_rejects_invalid_positive_integer_env(tmp_path, monkeypa
     ("env_name", "env_value", "message"),
     [
         (
+            "FASTGEN_STEPS_WIDTH",
+            "4097",
+            "FASTGEN_STEPS_WIDTH must be no greater than 4096",
+        ),
+        (
+            "FASTGEN_STEPS_HEIGHT",
+            "4097",
+            "FASTGEN_STEPS_HEIGHT must be no greater than 4096",
+        ),
+        (
+            "FASTGEN_STEPS_FRAMES",
+            "258",
+            "FASTGEN_STEPS_FRAMES must be no greater than 257",
+        ),
+        (
+            "FASTGEN_STEPS_FPS",
+            "241",
+            "FASTGEN_STEPS_FPS must be no greater than 240",
+        ),
+        (
+            "FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS",
+            str(24 * 60 * 60 + 1),
+            "FASTGEN_STEPS_CHILD_TIMEOUT_SECONDS must be no greater than 86400",
+        ),
+        (
+            "FASTGEN_STEPS_VALUES",
+            "513",
+            "FASTGEN_STEPS_VALUES must be no greater than 512",
+        ),
+        (
             "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES",
             str(1024 * 1024 + 1),
             "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES must be no greater than 1048576",
@@ -91,6 +121,21 @@ def test_steps_benchmark_rejects_unbounded_child_io_env(tmp_path, monkeypatch, e
     monkeypatch.setenv(env_name, env_value)
 
     with pytest.raises(Exception, match=message):
+        spec.loader.exec_module(module)
+
+
+def test_steps_benchmark_rejects_too_many_step_values(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_many_steps_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_VALUES", ",".join(str(index + 1) for index in range(17)))
+
+    with pytest.raises(Exception, match="FASTGEN_STEPS_VALUES may contain at most 16 values"):
         spec.loader.exec_module(module)
 
 
@@ -456,7 +501,17 @@ def test_steps_benchmark_run_single_preflights_png_frame_save(tmp_path, monkeypa
     result = module.run_single(1)
 
     assert result["video_shape"] == [2, 4, 4, 3]
-    assert host_checks == [(2 * 4 * 4 * 3 * module.PNG_FRAME_ALLOCATION_MULTIPLIER, "steps_1 png frames")]
+    frame_bytes = 2 * 4 * 4 * 3
+    assert host_checks == [
+        (
+            frame_bytes * module.VIDEO_STATS_ALLOCATION_MULTIPLIER,
+            "steps_1 quality metrics",
+        ),
+        (
+            frame_bytes * module.PNG_FRAME_ALLOCATION_MULTIPLIER,
+            "steps_1 png frames",
+        ),
+    ]
     assert len(saved) == 2
 
 
