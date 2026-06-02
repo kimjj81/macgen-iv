@@ -2258,6 +2258,33 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["clear"]
 
+    def test_base_synchronize_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import weakref
+        from fastgen_profiler.backends.base import synchronize_mlx
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        class FakeMx:
+            def clear_cache(self):
+                gc.collect()
+                assert ref is not None
+                assert ref() is None
+
+            def eval(self, target):
+                nonlocal ref
+                heavy = HeavyLocal()
+                ref = weakref.ref(heavy)
+                raise RuntimeError("metal sync failed")
+
+        monkeypatch.setitem(sys.modules, "mlx.core", FakeMx())
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX synchronization failed"):
+            synchronize_mlx(object())
+
     def test_adapter_synchronize_aborts_and_cleans_up_when_loaded_mlx_eval_fails(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
@@ -6525,6 +6552,45 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_ltx23_eval_failure_releases_target_before_mlx_cleanup(self, tmp_path, monkeypatch):
+        import gc
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        class FakeMx:
+            def eval(self, *targets):
+                nonlocal ref
+                heavy = HeavyLocal()
+                ref = weakref.ref(heavy)
+                raise RuntimeError("metal eval failed")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed"):
+            pipe._eval_mlx(FakeMx(), object(), phase="target release")
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_ltx23_decode_runtime_abort_from_upsampled_shape_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6909,6 +6975,45 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
 
         wan22_mlx_adapter._cleanup_loaded_runtime_after_error(exc)
+
+        assert cleanup_calls == ["cleanup"]
+
+    def test_wan22_eval_failure_releases_target_before_mlx_cleanup(self, tmp_path, monkeypatch):
+        import gc
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        class FakeMx:
+            def eval(self, *targets):
+                nonlocal ref
+                heavy = HeavyLocal()
+                ref = weakref.ref(heavy)
+                raise RuntimeError("metal eval failed")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="MLX eval failed"):
+            pipe._eval_mlx(FakeMx(), object(), phase="target release")
 
         assert cleanup_calls == ["cleanup"]
 
@@ -7737,6 +7842,87 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="postprocess import failed"):
             ltx.encode_video(frames, fps=24)
         with pytest.raises(RuntimeError, match="postprocess import failed"):
+            wan.encode_video(frames, fps=24)
+
+        assert cleanup_calls == ["cleanup", "cleanup"]
+
+    def test_encode_video_failure_clears_traceback_locals_before_cleanup(self, tmp_path, monkeypatch):
+        import gc
+        import numpy as np
+        import weakref
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        frames = np.zeros((4, 256, 256, 3), dtype=np.uint8)
+
+        class HeavyLocal:
+            pass
+
+        refs: list[weakref.ReferenceType[object]] = []
+
+        def save_video(video, path, fps):
+            heavy = HeavyLocal()
+            refs.append(weakref.ref(heavy))
+            raise RuntimeError("save_video failed after runtime opened")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert refs
+            assert refs[-1]() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.wan22_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+        for name in [
+            "mlx_video",
+            "mlx_video.models",
+            "mlx_video.models.ltx_2",
+            "mlx_video.models.wan_2",
+        ]:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        ltx_postprocess = types.ModuleType("mlx_video.models.ltx_2.postprocess")
+        ltx_postprocess.save_video = save_video
+        wan_postprocess = types.ModuleType("mlx_video.models.wan_2.postprocess")
+        wan_postprocess.save_video = save_video
+        monkeypatch.setitem(sys.modules, ltx_postprocess.__name__, ltx_postprocess)
+        monkeypatch.setitem(sys.modules, wan_postprocess.__name__, wan_postprocess)
+
+        ltx = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        wan = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        for pipe in (ltx, wan):
+            pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+            pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+            pipe._ensure_mlx_runtime_ready = lambda phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="save_video failed"):
+            ltx.encode_video(frames, fps=24)
+        with pytest.raises(RuntimeError, match="save_video failed"):
             wan.encode_video(frames, fps=24)
 
         assert cleanup_calls == ["cleanup", "cleanup"]

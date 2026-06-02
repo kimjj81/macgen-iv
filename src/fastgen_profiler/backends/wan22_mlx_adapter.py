@@ -328,6 +328,8 @@ class Wan22MLXPipeline:
         except Exception as exc:
             from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
+            target = None
+            gc.collect()
             _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 "Runtime memory abort [wan2.2 synchronize]: MLX synchronization failed; "
@@ -340,6 +342,8 @@ class Wan22MLXPipeline:
         except Exception as exc:
             from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
+            targets = ()
+            gc.collect()
             _cleanup_loaded_runtime_after_error(exc)
             raise RuntimeMemoryAbort(
                 f"Runtime memory abort [wan2.2 {phase}]: MLX eval failed; "
@@ -743,13 +747,15 @@ class Wan22MLXPipeline:
             save_video(frames, str(temp_path), fps=fps)
             self._check_memory("video_encode after")
             return temp_path
-        except Exception:
+        except Exception as exc:
             if temp_path is not None:
                 try:
                     temp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            _cleanup_loaded_runtime_after_error()
+            frames = None
+            gc.collect()
+            _cleanup_loaded_runtime_after_error(exc)
             raise
 
     def write_output(self, video: Any | Path, output_dir: Path, *, run_id: str) -> Path:

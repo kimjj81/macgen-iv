@@ -83,6 +83,8 @@ def synchronize_mlx(target: object | None = None) -> None:
     except Exception as exc:
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort, mlx_cleanup
 
+        target = None
+        _clear_traceback_frames(exc)
         mlx_cleanup()
         raise RuntimeMemoryAbort(
             "Runtime memory abort [synchronize]: MLX synchronization failed; "
@@ -110,3 +112,25 @@ def _memory_counter_or_none(value: object) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     return value
+
+
+def _clear_traceback_frames(exc: BaseException) -> None:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)

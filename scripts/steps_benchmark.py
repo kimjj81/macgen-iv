@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import importlib.util
+import gc
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -45,6 +46,7 @@ from fastgen_profiler.mlx_guard import (
 
 PNG_FRAME_ALLOCATION_MULTIPLIER = 4
 VIDEO_STATS_ALLOCATION_MULTIPLIER = 4
+_CLEANUP_DONE_ATTR = "_fastgen_cleanup_done"
 MAX_DIMENSION = 4096
 MAX_FRAMES = 257
 MAX_FPS = 240
@@ -115,8 +117,10 @@ def _eval_mlx(mx, target, *, label: str) -> None:
     try:
         mx.eval(target)
     except Exception as exc:
+        target = None
+        gc.collect()
         _clear_exception_traceback_frames(exc)
-        mlx_cleanup()
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: MLX eval failed; "
             "aborting because Metal runtime state may be unsafe."
@@ -345,6 +349,8 @@ def run_single(steps: int):
         _clear_exception_traceback_frames(exc)
         pipe = latents = video = context = prepared = img = None
         gc.collect()
+        if not _exception_cleanup_done(exc):
+            _cleanup_after_exception(exc)
         raise
 
     return result
@@ -372,6 +378,33 @@ def _clear_exception_traceback_frames(exc: BaseException | None) -> None:
             stack.append(current.__cause__)
         if current.__context__ is not None:
             stack.append(current.__context__)
+
+
+def _exception_cleanup_done(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if bool(getattr(current, _CLEANUP_DONE_ATTR, False)):
+            return True
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
+
+
+def _cleanup_after_exception(exc: BaseException) -> dict[str, object]:
+    cleanup = mlx_cleanup()
+    try:
+        setattr(exc, _CLEANUP_DONE_ATTR, True)
+    except Exception:
+        pass
+    return cleanup
 
 
 def _check_decoded_video_shape(video, *, label: str) -> None:
@@ -435,7 +468,10 @@ def _video_pixel_stat_int(video: Any, metric: str, *, label: str) -> int:
     try:
         return int(getattr(video, metric)())
     except Exception as exc:
-        mlx_cleanup()
+        video = None
+        gc.collect()
+        _clear_exception_traceback_frames(exc)
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
@@ -446,7 +482,10 @@ def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
     try:
         return float(getattr(video, metric)())
     except Exception as exc:
-        mlx_cleanup()
+        video = None
+        gc.collect()
+        _clear_exception_traceback_frames(exc)
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
             "aborting because host materialization state may be unsafe."
@@ -454,12 +493,17 @@ def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
 
 
 def _save_png_frame(image_module: Any, video: Any, index: int, *, step_dir: Path, label: str) -> Any:
+    image = None
     try:
         image = image_module.fromarray(video[index])
         image.save(str(step_dir / f"frame_{index:03d}.png"))
         return image
     except Exception as exc:
-        mlx_cleanup()
+        image = None
+        video = None
+        gc.collect()
+        _clear_exception_traceback_frames(exc)
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label} png frame {index}]: PNG frame save failed; "
             "aborting because host materialization state may be unsafe."
@@ -485,15 +529,17 @@ def run_child() -> int:
         error = _safe_exception_text(e)
         print(f"  [guard] steps={steps} ABORTED: {error}")
         result = {"steps": steps, "error": error, "aborted": True}
+        if not _exception_cleanup_done(e):
+            result["cleanup"] = _cleanup_after_exception(e)
         _clear_exception_traceback_frames(e)
-        result["cleanup"] = mlx_cleanup()
     except Exception as e:
         error = _safe_exception_text(e)
         print(f"  steps={steps} FAILED: {error}")
         print("  [guard] traceback suppressed to avoid unbounded exception formatting")
         result = {"steps": steps, "error": error}
+        if not _exception_cleanup_done(e):
+            result["cleanup"] = _cleanup_after_exception(e)
         _clear_exception_traceback_frames(e)
-        result["cleanup"] = mlx_cleanup()
 
     _write_child_result_file(result_path, result)
     return 0
@@ -838,8 +884,9 @@ def main():
             print(f"  [guard] steps={steps} ABORTED: {error}")
             all_results.append({"steps": steps, "error": error, "aborted": True})
             increment_run_counter()
+            if not _exception_cleanup_done(e):
+                _cleanup_after_exception(e)
             _clear_exception_traceback_frames(e)
-            mlx_cleanup()
         except Exception as e:
             error = _safe_exception_text(e)
             print(f"  steps={steps} FAILED: {error}")
@@ -848,8 +895,9 @@ def main():
             # Treat unknown failures as a consumed MLX process slot: the error
             # may have happened after Metal state was initialized.
             increment_run_counter()
+            if not _exception_cleanup_done(e):
+                _cleanup_after_exception(e)
             _clear_exception_traceback_frames(e)
-            mlx_cleanup()
 
     # Write JSONL
     _write_steps_jsonl(RESULTS_JSONL, all_results)

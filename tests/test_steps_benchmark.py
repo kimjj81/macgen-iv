@@ -1176,7 +1176,6 @@ def test_steps_benchmark_eval_failure_clears_cause_traceback_before_cleanup(tmp_
         pass
 
     ref: weakref.ReferenceType[object] | None = None
-
     class FakeMx:
         def eval(self, target):
             nonlocal ref
