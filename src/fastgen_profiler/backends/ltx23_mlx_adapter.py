@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from fastgen_profiler.metrics import MAX_RUN_DIMENSION, MAX_RUN_FPS, MAX_RUN_FRAMES, MAX_RUN_STEPS
+
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
@@ -24,18 +26,40 @@ _MAX_PRELOAD_SCAN_DIRS = 10_000
 _MAX_PRELOAD_SCAN_FILES = 10_000
 _MAX_DENOISE_STEPS = 512
 _MAX_FILTERED_WEIGHT_ITEMS = 100_000
+_MAX_PARAMETER_NAMES = 100_000
 
 
-def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
+def _flatten_parameter_names(parameters: Any, prefix: str = "", *, label: str = "parameters") -> set[str]:
+    result: set[str] = set()
+    _collect_parameter_names(parameters, prefix=prefix, result=result, label=label)
+    return result
+
+
+def _collect_parameter_names(
+    parameters: Any,
+    *,
+    prefix: str,
+    result: set[str],
+    label: str,
+) -> None:
     if isinstance(parameters, dict):
-        result: set[str] = set()
         for key, value in parameters.items():
             next_prefix = f"{prefix}.{key}" if prefix else str(key)
-            result.update(_flatten_parameter_names(value, next_prefix))
-        return result
+            _collect_parameter_names(value, prefix=next_prefix, result=result, label=label)
+        return
     if prefix:
-        return {prefix}
-    return set()
+        _add_parameter_name(result, prefix, label=label)
+
+
+def _add_parameter_name(result: set[str], name: str, *, label: str) -> None:
+    if name in result:
+        return
+    if len(result) >= _MAX_PARAMETER_NAMES:
+        _raise_runtime_abort(
+            f"{label} exposed more than {_MAX_PARAMETER_NAMES} parameter names; "
+            "refusing unbounded parameter-name materialization"
+        )
+    result.add(name)
 
 
 class LTX23MLXPipeline:
@@ -63,6 +87,7 @@ class LTX23MLXPipeline:
         tokenizer_dir: Path | str | None = None,
         auto_download: bool = False,
     ) -> None:
+        _validate_pipeline_run_bounds(width=width, height=height, frames=frames, fps=fps, steps=steps)
         self.model_path = Path(model_path)
         self.seed = seed
         self.width = width
@@ -451,7 +476,10 @@ class LTX23MLXPipeline:
             self.model = LTXModel(self.config)
             self._check_memory("model_construct after")
 
-            model_param_names = _flatten_parameter_names(self.model.parameters())
+            model_param_names = _flatten_parameter_names(
+                self.model.parameters(),
+                label="LTX2.3 transformer parameters",
+            )
             if not model_param_names:
                 raise RuntimeError(
                     "LTX2.3 transformer exposed no model parameters; refusing to continue "
@@ -568,9 +596,13 @@ class LTX23MLXPipeline:
             self._check_memory("text_projection load_safetensors before")
             tp_weights = load_safetensors(text_proj_path)
             self._check_memory("text_projection load_safetensors after")
-            tp_model_params = set()
+            tp_model_params: set[str] = set()
             for k in self.text_proj.parameters():
-                tp_model_params.add(k)
+                _add_parameter_name(
+                    tp_model_params,
+                    str(k),
+                    label="LTX2.3 text projection parameters",
+                )
             filtered_tp = _filtered_weight_items(
                 tp_weights.items(),
                 allowed_names=tp_model_params,
@@ -664,7 +696,10 @@ class LTX23MLXPipeline:
             # Create and load Gemma3 text model
             text_model = Gemma3Model(model_args)
             self._check_memory("text_encoder construct after")
-            text_model_params = _flatten_parameter_names(text_model.parameters())
+            text_model_params = _flatten_parameter_names(
+                text_model.parameters(),
+                label="LTX2.3 text encoder parameters",
+            )
             if not text_model_params:
                 raise RuntimeError(
                     "LTX2.3 text encoder exposed no model parameters; refusing to continue "
@@ -1034,6 +1069,23 @@ class LTX23MLXPipeline:
 
 def create_ltx23_pipeline(**kwargs: Any) -> LTX23MLXPipeline:
     return LTX23MLXPipeline(**kwargs)
+
+
+def _validate_pipeline_run_bounds(*, width: Any, height: Any, frames: Any, fps: Any, steps: Any) -> None:
+    _validate_positive_capped_int(width, "width", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(height, "height", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(frames, "frames", MAX_RUN_FRAMES)
+    _validate_positive_capped_int(fps, "fps", MAX_RUN_FPS)
+    _validate_positive_capped_int(steps, "steps", MAX_RUN_STEPS)
+
+
+def _validate_positive_capped_int(value: Any, name: str, max_value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if value > max_value:
+        raise ValueError(f"{name} must be no greater than {max_value}")
 
 
 def _latent_grid(size: int) -> int:

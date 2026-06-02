@@ -3744,6 +3744,36 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert filtered.match_count == 1
         assert list(filtered) == [("expected.weight", "first"), ("expected.bias", "second")]
 
+    def test_ltx23_parameter_name_flatten_fails_closed_when_unbounded(self, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PARAMETER_NAMES", 2)
+
+        with pytest.raises(RuntimeMemoryAbort, match="more than 2 parameter names"):
+            ltx23_mlx_adapter._flatten_parameter_names(
+                {
+                    "layer0": {"weight": object()},
+                    "layer1": {"weight": object()},
+                    "layer2": {"weight": object()},
+                },
+                label="test model parameters",
+            )
+
+    def test_ltx23_parameter_name_add_fails_closed_when_unbounded(self, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PARAMETER_NAMES", 1)
+        names: set[str] = set()
+
+        ltx23_mlx_adapter._add_parameter_name(names, "first.weight", label="test projection parameters")
+
+        with pytest.raises(RuntimeMemoryAbort, match="test projection parameters"):
+            ltx23_mlx_adapter._add_parameter_name(
+                names,
+                "second.weight",
+                label="test projection parameters",
+            )
+
     def test_ltx23_encode_text_runtime_exception_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6791,6 +6821,38 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 ).load_model()
 
         limits.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("factory_name", "kwargs", "message"),
+        [
+            ("create_ltx23_pipeline", {"frames": 258}, "frames must be no greater than 257"),
+            ("create_wan22_pipeline", {"steps": 513}, "steps must be no greater than 512"),
+        ],
+    )
+    def test_adapter_factories_reject_direct_configs_outside_safe_bounds(
+        self,
+        tmp_path,
+        factory_name,
+        kwargs,
+        message,
+    ):
+        if factory_name == "create_ltx23_pipeline":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import create_ltx23_pipeline as factory
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import create_wan22_pipeline as factory
+
+        config = {
+            "model_path": tmp_path,
+            "seed": 1,
+            "width": 256,
+            "height": 256,
+            "frames": 4,
+            "steps": 1,
+        }
+        config.update(kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            factory(**config)
 
     def test_wan22_missing_config_blocks_before_mlx_limits(self, tmp_path):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline

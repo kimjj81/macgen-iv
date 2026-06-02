@@ -19,6 +19,8 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any
 
+from fastgen_profiler.metrics import MAX_RUN_DIMENSION, MAX_RUN_FPS, MAX_RUN_FRAMES, MAX_RUN_STEPS
+
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
@@ -69,6 +71,7 @@ class Wan22MLXPipeline:
         save_video: bool = False,
         dry_run: bool = False,
     ) -> None:
+        _validate_pipeline_run_bounds(width=width, height=height, frames=frames, fps=fps, steps=steps)
         self.model_path = Path(model_path)
         self.seed = seed
         self.width = width
@@ -740,6 +743,23 @@ class Wan22MLXPipeline:
 
 def create_wan22_pipeline(**kwargs: Any) -> Wan22MLXPipeline:
     return Wan22MLXPipeline(**kwargs)
+
+
+def _validate_pipeline_run_bounds(*, width: Any, height: Any, frames: Any, fps: Any, steps: Any) -> None:
+    _validate_positive_capped_int(width, "width", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(height, "height", MAX_RUN_DIMENSION)
+    _validate_positive_capped_int(frames, "frames", MAX_RUN_FRAMES)
+    _validate_positive_capped_int(fps, "fps", MAX_RUN_FPS)
+    _validate_positive_capped_int(steps, "steps", MAX_RUN_STEPS)
+
+
+def _validate_positive_capped_int(value: Any, name: str, max_value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if value > max_value:
+        raise ValueError(f"{name} must be no greater than {max_value}")
 
 
 def _load_config(model_path: Path) -> tuple[Any, dict[str, Any] | None]:
