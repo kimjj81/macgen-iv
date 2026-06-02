@@ -171,7 +171,7 @@ class LTX23MLXPipeline:
                 "create a fresh pipeline for a different run shape"
             )
 
-    def _validate_latents_shape(self, latents: Any, phase: str) -> None:
+    def _validate_latents_shape(self, latents: Any, phase: str) -> tuple[int, int, int, int, int]:
         expected = self._expected_latent_shape()
         actual = _bounded_shape_tuple(latents, expected_rank=len(expected), label=f"LTX2.3 latent {phase}")
         if actual != expected:
@@ -179,6 +179,7 @@ class LTX23MLXPipeline:
                 f"latent shape {actual} for {phase} does not match expected {expected}; "
                 "refusing to allocate derived MLX tensors for an unexpected run shape"
             )
+        return expected
 
     def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
         if not isinstance(steps, int) or isinstance(steps, bool):
@@ -758,7 +759,7 @@ class LTX23MLXPipeline:
             raise RuntimeError("denoise_step called before load_model")
         self._validate_denoise_step_args(step_index=step_index, steps=steps)
         phase = f"denoise {step_index + 1}/{steps}"
-        self._validate_latents_shape(latents, phase)
+        latent_shape = self._validate_latents_shape(latents, phase)
 
         self._check_memory(f"{phase} before")
         self._ensure_mlx_runtime_ready("denoise")
@@ -768,7 +769,7 @@ class LTX23MLXPipeline:
             from mlx_video.models.ltx_2.transformer import Modality
 
             dtype = latents.dtype
-            b, c, f, h, w = latents.shape
+            b, c, f, h, w = latent_shape
             num_tokens = f * h * w
             latent_elements = b * c * f * h * w
             position_elements = b * 3 * num_tokens * 2
@@ -946,8 +947,6 @@ class LTX23MLXPipeline:
             raise
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
-        if frames.ndim != 4 or frames.shape[-1] != 3:
-            raise RuntimeError(f"decoded LTX2.3 frames must have shape [T,H,W,3], got {frames.shape}")
         self._validate_frame_shape(frames, "video_encode")
         if self.dry_run or not self.save_video:
             return frames

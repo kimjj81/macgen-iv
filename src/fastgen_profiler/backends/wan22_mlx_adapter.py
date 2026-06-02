@@ -671,8 +671,6 @@ class Wan22MLXPipeline:
             raise
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
-        if frames.ndim != 4 or frames.shape[-1] != 3:
-            raise RuntimeError(f"decoded Wan2.2 frames must have shape [T,H,W,3], got {frames.shape}")
         self._validate_frame_shape(frames, "video_encode")
         if self.dry_run or not self.save_video:
             return frames

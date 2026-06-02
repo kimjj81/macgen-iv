@@ -3221,6 +3221,53 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="denoise tensors too large"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
+    def test_ltx23_denoise_preflight_reuses_validated_latent_shape(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class SinglePassShape:
+            def __init__(self, dims):
+                self._dims = dims
+                self._iterations = 0
+
+            def __iter__(self):
+                self._iterations += 1
+                if self._iterations > 1:
+                    raise AssertionError("denoise must not re-read latent shape after validation")
+                yield from self._dims
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = SinglePassShape((1, 128, 4, 32, 32))
+
+        fake_mx = types.SimpleNamespace(
+            array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be preflighted")),
+            float32="float32",
+        )
+        transformer_module = types.ModuleType("mlx_video.models.ltx_2.transformer")
+        transformer_module.Modality = object
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, "mlx_video.models.ltx_2.transformer", transformer_module)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeMemoryAbort("denoise tensors too large")
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="denoise tensors too large"):
+            pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
+
     def test_ltx23_denoise_rejects_latent_shape_mismatch_before_mx_array(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6229,6 +6276,42 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 ltx.encode_video(frames, fps=24)
             with pytest.raises(RuntimeMemoryAbort, match="encode too large"):
                 wan.encode_video(frames, fps=24)
+
+    @pytest.mark.parametrize("adapter", ["ltx", "wan"])
+    def test_video_encode_validates_shape_before_ndim_access(self, tmp_path, adapter):
+        if adapter == "ltx":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+            pipe = LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+            pipe = Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+
+        class FakeFrames:
+            shape = (4, 256, 256, 3)
+
+            @property
+            def ndim(self):
+                raise AssertionError("encode_video must use bounded shape validation before ndim access")
+
+        frames = FakeFrames()
+
+        assert pipe.encode_video(frames, fps=24) is frames
 
     def test_write_output_preflights_numpy_frame_buffer(self, tmp_path):
         import numpy as np
