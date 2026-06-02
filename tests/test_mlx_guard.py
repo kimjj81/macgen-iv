@@ -2495,6 +2495,30 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         limits.assert_not_called()
 
+    def test_ltx23_config_number_scan_rejects_unsafe_keys_without_repr_or_str(self):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        class UnsafeKey:
+            def __repr__(self):
+                raise AssertionError("config numeric scan must not call repr on keys")
+
+            def __str__(self):
+                raise AssertionError("config numeric scan must not call str on keys")
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeKey"):
+            list(ltx23_mlx_adapter._iter_config_numbers({UnsafeKey(): 1}))
+
+    def test_ltx23_config_number_scan_rejects_deep_tree_without_recursion(self, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_CONFIG_JSON_DEPTH", 2)
+        value: object = 1
+        for _ in range(4):
+            value = {"nested": value}
+
+        with pytest.raises(RuntimeMemoryAbort, match="safe depth 2"):
+            list(ltx23_mlx_adapter._iter_config_numbers(value))
+
     def test_ltx23_load_model_rejects_unsafe_structural_config_before_mlx_limits(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6423,6 +6447,47 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             shape = Shape()
 
         with pytest.raises(RuntimeMemoryAbort, match="shape rank"):
+            validator(FakeFrames(), "decode")
+
+    @pytest.mark.parametrize("adapter", ["ltx", "wan"])
+    def test_adapter_shape_validation_rejects_unsafe_dimensions_without_repr(self, tmp_path, adapter):
+        class UnsafeDim:
+            def __repr__(self):
+                raise AssertionError("shape guard must not call repr on unknown dimensions")
+
+        if adapter == "ltx":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+            pipe = LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            validator = pipe._validate_frame_shape
+            shape = (4, 256, 256, UnsafeDim())
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+            pipe = Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            validator = pipe._validate_frame_shape
+            shape = (4, 256, 256, UnsafeDim())
+
+        class FakeFrames:
+            pass
+
+        FakeFrames.shape = shape
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeDim"):
             validator(FakeFrames(), "decode")
 
     @pytest.mark.parametrize(

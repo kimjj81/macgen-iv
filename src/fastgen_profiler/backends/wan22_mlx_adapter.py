@@ -1017,10 +1017,18 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
             )
         if not isinstance(dim, int) or isinstance(dim, bool):
             _raise_runtime_abort(
-                f"{label} shape contains non-integer dimension {dim!r}; refusing unbounded shape inspection"
+                f"{label} shape contains non-integer dimension {_shape_dim_text(dim)}; "
+                "refusing unbounded shape inspection"
             )
         dims.append(dim)
     return tuple(dims)
+
+
+def _shape_dim_text(value: Any) -> str:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
 def _frame_postprocess_budget_bytes(frames: Any, *, frame_shape: tuple[int, int, int, int] | None = None) -> int:

@@ -1321,10 +1321,18 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
             )
         if not isinstance(dim, int) or isinstance(dim, bool):
             _raise_runtime_abort(
-                f"{label} shape contains non-integer dimension {dim!r}; refusing unbounded shape inspection"
+                f"{label} shape contains non-integer dimension {_shape_dim_text(dim)}; "
+                "refusing unbounded shape inspection"
             )
         dims.append(dim)
     return tuple(dims)
+
+
+def _shape_dim_text(value: Any) -> str:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
 class _FilteredWeightItems:
@@ -1539,16 +1547,45 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
 
 
 def _iter_config_numbers(value: Any, prefix: str = ""):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            child_prefix = f"{prefix}.{key}" if prefix else str(key)
-            yield from _iter_config_numbers(child, child_prefix)
-    elif isinstance(value, (list, tuple)):
-        for index, child in enumerate(value):
-            child_prefix = f"{prefix}[{index}]"
-            yield from _iter_config_numbers(child, child_prefix)
-    elif isinstance(value, int) and not isinstance(value, bool):
-        yield prefix, value
+    stack: list[tuple[Any, str, int]] = [(value, prefix, 0)]
+    visited_items = 0
+    while stack:
+        current, current_prefix, depth = stack.pop()
+        if depth > _MAX_CONFIG_JSON_DEPTH:
+            _raise_runtime_abort(
+                f"LTX2.3 config numeric scan exceeds safe depth {_MAX_CONFIG_JSON_DEPTH}; "
+                "refusing unbounded config traversal"
+            )
+        if isinstance(current, dict):
+            visited_items += len(current)
+            if visited_items > _MAX_CONFIG_JSON_ITEMS:
+                _raise_runtime_abort(
+                    f"LTX2.3 config numeric scan exceeds safe item limit {_MAX_CONFIG_JSON_ITEMS}; "
+                    "refusing unbounded config traversal"
+                )
+            for key, child in current.items():
+                if not isinstance(key, str):
+                    key_type = type(key)
+                    _raise_runtime_abort(
+                        f"LTX2.3 config key <{key_type.__module__}.{key_type.__qualname__}> "
+                        "is not a string; refusing unbounded config traversal"
+                    )
+                child_prefix = f"{current_prefix}.{key}" if current_prefix else key
+                stack.append((child, child_prefix, depth + 1))
+            continue
+        if isinstance(current, (list, tuple)):
+            visited_items += len(current)
+            if visited_items > _MAX_CONFIG_JSON_ITEMS:
+                _raise_runtime_abort(
+                    f"LTX2.3 config numeric scan exceeds safe item limit {_MAX_CONFIG_JSON_ITEMS}; "
+                    "refusing unbounded config traversal"
+                )
+            for index, child in enumerate(current):
+                child_prefix = f"{current_prefix}[{index}]"
+                stack.append((child, child_prefix, depth + 1))
+            continue
+        if isinstance(current, int) and not isinstance(current, bool):
+            yield current_prefix, current
 
 
 def _is_structural_config_key(key: str) -> bool:
