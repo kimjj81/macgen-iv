@@ -3858,6 +3858,83 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 label="test projection parameters",
             )
 
+    def test_ltx23_parameter_name_add_rejects_long_names(self, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PARAMETER_NAME_CHARS", 4)
+
+        with pytest.raises(RuntimeMemoryAbort, match="name exceeds 4"):
+            ltx23_mlx_adapter._add_parameter_name(
+                set(),
+                "too-long",
+                label="test projection parameters",
+            )
+
+    def test_ltx23_parameter_name_flatten_rejects_deep_nesting(self, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PARAMETER_NAME_DEPTH", 2)
+        params: object = object()
+        for index in range(4):
+            params = {f"layer{index}": params}
+
+        with pytest.raises(RuntimeMemoryAbort, match="nesting exceeds 2"):
+            ltx23_mlx_adapter._flatten_parameter_names(params, label="test model parameters")
+
+    def test_ltx23_parameter_name_flatten_rejects_unsafe_keys_without_repr_or_str(self):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        class UnsafeKey:
+            def __repr__(self):
+                raise AssertionError("parameter-name guard must not call repr on unknown keys")
+
+            def __str__(self):
+                raise AssertionError("parameter-name guard must not call str on unknown keys")
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeKey"):
+            ltx23_mlx_adapter._flatten_parameter_names(
+                {UnsafeKey(): object()},
+                label="test model parameters",
+            )
+
+    def test_ltx23_weight_filter_rejects_unsafe_keys_without_repr_or_str(self):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        class UnsafeKey:
+            def __repr__(self):
+                raise AssertionError("weight-key guard must not call repr on unknown keys")
+
+            def __str__(self):
+                raise AssertionError("weight-key guard must not call str on unknown keys")
+
+        with pytest.raises(RuntimeMemoryAbort, match="UnsafeKey"):
+            list(
+                ltx23_mlx_adapter._filtered_weight_items(
+                    [(UnsafeKey(), object())],
+                    allowed_names={"expected.weight"},
+                    label="test weights",
+                )
+            )
+
+    def test_ltx23_weight_filter_rejects_malformed_items_without_repr(self):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        class UnsafeItem:
+            def __iter__(self):
+                raise TypeError("not a pair")
+
+            def __repr__(self):
+                raise AssertionError("malformed weight item repr must not be called")
+
+        with pytest.raises(RuntimeMemoryAbort, match="malformed weight item"):
+            list(
+                ltx23_mlx_adapter._filtered_weight_items(
+                    [UnsafeItem()],
+                    allowed_names={"expected.weight"},
+                    label="test weights",
+                )
+            )
+
     def test_ltx23_encode_text_runtime_exception_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 

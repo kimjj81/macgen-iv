@@ -27,33 +27,64 @@ _MAX_PRELOAD_SCAN_FILES = 10_000
 _MAX_DENOISE_STEPS = 512
 _MAX_FILTERED_WEIGHT_ITEMS = 100_000
 _MAX_PARAMETER_NAMES = 100_000
+_MAX_PARAMETER_NAME_CHARS = 1024
+_MAX_PARAMETER_NAME_DEPTH = 256
 _MAX_CONFIG_JSON_ITEMS = 10_000
 _MAX_CONFIG_JSON_DEPTH = 32
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "", *, label: str = "parameters") -> set[str]:
     result: set[str] = set()
-    _collect_parameter_names(parameters, prefix=prefix, result=result, label=label)
+    stack: list[tuple[Any, str, int]] = [(parameters, prefix, 0)]
+    while stack:
+        current, current_prefix, depth = stack.pop()
+        if depth > _MAX_PARAMETER_NAME_DEPTH:
+            _raise_runtime_abort(
+                f"{label} nesting exceeds {_MAX_PARAMETER_NAME_DEPTH}; "
+                "refusing unbounded parameter-name traversal"
+            )
+        if isinstance(current, dict):
+            for key, value in current.items():
+                key_text = _parameter_key_text(key, label=label)
+                next_prefix = _join_parameter_name(current_prefix, key_text, label=label)
+                stack.append((value, next_prefix, depth + 1))
+            continue
+        if current_prefix:
+            _add_parameter_name(result, current_prefix, label=label)
     return result
 
 
-def _collect_parameter_names(
-    parameters: Any,
-    *,
-    prefix: str,
-    result: set[str],
-    label: str,
-) -> None:
-    if isinstance(parameters, dict):
-        for key, value in parameters.items():
-            next_prefix = f"{prefix}.{key}" if prefix else str(key)
-            _collect_parameter_names(value, prefix=next_prefix, result=result, label=label)
-        return
-    if prefix:
-        _add_parameter_name(result, prefix, label=label)
+def _parameter_key_text(key: Any, *, label: str) -> str:
+    if not isinstance(key, str):
+        key_type = type(key)
+        _raise_runtime_abort(
+            f"{label} key <{key_type.__module__}.{key_type.__qualname__}> is not a string; "
+            "refusing unbounded parameter-name materialization"
+        )
+    if len(key) > _MAX_PARAMETER_NAME_CHARS:
+        _raise_runtime_abort(
+            f"{label} key exceeds {_MAX_PARAMETER_NAME_CHARS} characters; "
+            "refusing unbounded parameter-name materialization"
+        )
+    return key
+
+
+def _join_parameter_name(prefix: str, key: str, *, label: str) -> str:
+    name = f"{prefix}.{key}" if prefix else key
+    if len(name) > _MAX_PARAMETER_NAME_CHARS:
+        _raise_runtime_abort(
+            f"{label} name exceeds {_MAX_PARAMETER_NAME_CHARS} characters; "
+            "refusing unbounded parameter-name materialization"
+        )
+    return name
 
 
 def _add_parameter_name(result: set[str], name: str, *, label: str) -> None:
+    if len(name) > _MAX_PARAMETER_NAME_CHARS:
+        _raise_runtime_abort(
+            f"{label} name exceeds {_MAX_PARAMETER_NAME_CHARS} characters; "
+            "refusing unbounded parameter-name materialization"
+        )
     if name in result:
         return
     if len(result) >= _MAX_PARAMETER_NAMES:
@@ -602,7 +633,7 @@ class LTX23MLXPipeline:
             for k in self.text_proj.parameters():
                 _add_parameter_name(
                     tp_model_params,
-                    str(k),
+                    _parameter_key_text(k, label="LTX2.3 text projection parameters"),
                     label="LTX2.3 text projection parameters",
                 )
             filtered_tp = _filtered_weight_items(
@@ -1331,7 +1362,8 @@ class _FilteredWeightItems:
             try:
                 key, value = item
             except (TypeError, ValueError):
-                _raise_runtime_abort(f"{self._label} contained malformed weight item {item!r}")
+                _raise_runtime_abort(f"{self._label} contained malformed weight item")
+            key = _weight_key_text(key, label=self._label)
             if key in self._allowed_names and not key.endswith(self._excluded_suffixes):
                 self.match_count += 1
                 self.matched_keys.add(key)
@@ -1354,7 +1386,8 @@ def _filtered_weight_items(
         try:
             key, value = item
         except (TypeError, ValueError):
-            _raise_runtime_abort(f"{label} contained malformed weight item {item!r}")
+            _raise_runtime_abort(f"{label} contained malformed weight item")
+        key = _weight_key_text(key, label=label)
         if key in allowed_names and not key.endswith(excluded_suffixes):
             return _FilteredWeightItems(
                 iterator,
@@ -1407,7 +1440,7 @@ class _MappedLTXTextEncoderWeightItems:
             try:
                 raw_key, value = item
             except (TypeError, ValueError):
-                _raise_runtime_abort(f"{self._label} contained malformed weight item {item!r}")
+                _raise_runtime_abort(f"{self._label} contained malformed weight item")
             key = _map_ltx_text_encoder_weight_key(raw_key)
             if key is not None and key in self._allowed_names:
                 self.match_count += 1
@@ -1430,7 +1463,7 @@ def _mapped_ltx_text_encoder_weight_items(
         try:
             raw_key, value = item
         except (TypeError, ValueError):
-            _raise_runtime_abort(f"{label} contained malformed weight item {item!r}")
+            _raise_runtime_abort(f"{label} contained malformed weight item")
         key = _map_ltx_text_encoder_weight_key(raw_key)
         if key is not None and key in allowed_names:
             return _MappedLTXTextEncoderWeightItems(
@@ -1450,13 +1483,27 @@ def _mapped_ltx_text_encoder_weight_items(
 
 
 def _map_ltx_text_encoder_weight_key(key: Any) -> str | None:
-    if not isinstance(key, str):
-        _raise_runtime_abort(f"LTX2.3 text encoder weight key {key!r} is not a string")
+    key = _weight_key_text(key, label="LTX2.3 text encoder weights")
     if key.startswith("language_model.model."):
         return key[len("language_model.model."):]
     if key.startswith("model."):
         return key[len("model."):]
     return None
+
+
+def _weight_key_text(key: Any, *, label: str) -> str:
+    if not isinstance(key, str):
+        key_type = type(key)
+        _raise_runtime_abort(
+            f"{label} key <{key_type.__module__}.{key_type.__qualname__}> is not a string; "
+            "refusing unbounded weight-key materialization"
+        )
+    if len(key) > _MAX_PARAMETER_NAME_CHARS:
+        _raise_runtime_abort(
+            f"{label} key exceeds {_MAX_PARAMETER_NAME_CHARS} characters; "
+            "refusing unbounded weight-key materialization"
+        )
+    return key
 
 
 def _frame_postprocess_budget_bytes(frames: Any, *, frame_shape: tuple[int, int, int, int] | None = None) -> int:
