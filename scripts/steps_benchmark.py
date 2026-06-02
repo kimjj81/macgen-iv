@@ -450,11 +450,7 @@ def run_step_in_child(steps: int) -> dict:
                 "log_path": str(child_log),
             }
         try:
-            records = [
-                json.loads(line)
-                for line in child_result.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            record = _read_last_child_result(child_result)
         except json.JSONDecodeError as exc:
             return {
                 "steps": steps,
@@ -462,14 +458,14 @@ def run_step_in_child(steps: int) -> dict:
                 "aborted": True,
                 "log_path": str(child_log),
             }
-        if not records:
+        if record is None:
             return {
                 "steps": steps,
                 "error": "child result file did not contain a result record",
                 "aborted": True,
                 "log_path": str(child_log),
             }
-        record = _bound_steps_result(records[-1])
+        record = _bound_steps_result(record)
         record.setdefault("log_path", str(child_log))
         return record
     return {
@@ -493,6 +489,17 @@ def _print_child_log_tail(path: Path) -> None:
             print(f"\n[guard] child log tail from {path} ({CHILD_LOG_TAIL_BYTES} bytes):")
         data = handle.read()
     print(data.decode("utf-8", errors="replace"), end="")
+
+
+def _read_last_child_result(path: Path) -> dict[str, Any] | None:
+    last_record = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            last_record = json.loads(stripped)
+    return last_record
 
 
 def _bound_steps_result(value: Any) -> Any:

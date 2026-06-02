@@ -1027,6 +1027,39 @@ def test_steps_benchmark_rejects_malformed_child_result_as_abort(tmp_path, monke
     assert result["log_path"] == str(module.OUTPUT_BASE / "steps_1.child.log")
 
 
+def test_steps_benchmark_streams_child_result_without_read_text(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_stream_child_result_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    spec.loader.exec_module(module)
+    module.OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
+    child_result = module.OUTPUT_BASE / "steps_1.child.json"
+
+    def fake_run(*args, **_kwargs):
+        child_result.write_text(
+            json.dumps({"steps": 1, "progress": "ignored"}) + "\n"
+            + json.dumps({"steps": 1, "denoise_total_s": 1, "vae_decode_s": 2}) + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=args[0], returncode=0)
+
+    with patch.object(module.Path, "read_text", side_effect=AssertionError("child result must be streamed")):
+        with patch.object(module.subprocess, "run", side_effect=fake_run):
+            result = module.run_step_in_child(1)
+
+    assert result["steps"] == 1
+    assert result["denoise_total_s"] == 1
+    assert result["vae_decode_s"] == 2
+    assert result["log_path"] == str(module.OUTPUT_BASE / "steps_1.child.log")
+
+
 def test_steps_benchmark_rejects_oversized_child_result(tmp_path, monkeypatch):
     import importlib.util
 

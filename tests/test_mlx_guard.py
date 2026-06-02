@@ -6313,6 +6313,68 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert pipe.encode_video(frames, fps=24) is frames
 
+    @pytest.mark.parametrize("method_name", ["encode_video", "write_output"])
+    @pytest.mark.parametrize("adapter", ["ltx", "wan"])
+    def test_video_output_preflight_reuses_validated_frame_shape(
+        self,
+        tmp_path,
+        adapter,
+        method_name,
+        monkeypatch,
+    ):
+        if adapter == "ltx":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+            pipe = LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+                save_video=method_name == "encode_video",
+            )
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+            pipe = Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+                save_video=method_name == "encode_video",
+            )
+
+        class SinglePassShape:
+            def __init__(self):
+                self._iterations = 0
+
+            def __iter__(self):
+                self._iterations += 1
+                if self._iterations > 1:
+                    raise AssertionError("video output preflight must not re-read frame shape")
+                yield from (4, 256, 256, 3)
+
+        class FakeFrames:
+            shape = SinglePassShape()
+            nbytes = 0
+
+        frames = FakeFrames()
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.check_runtime_memory", lambda label: None)
+        monkeypatch.setattr(
+            "fastgen_profiler.mlx_guard.check_host_allocation_headroom",
+            lambda required, *, label: (_ for _ in ()).throw(RuntimeMemoryAbort(f"{label} blocked")),
+        )
+
+        if method_name == "encode_video":
+            with pytest.raises(RuntimeMemoryAbort, match="video_encode frames blocked"):
+                pipe.encode_video(frames, fps=24)
+        else:
+            with pytest.raises(RuntimeMemoryAbort, match="file_write frames blocked"):
+                pipe.write_output(frames, tmp_path / f"{adapter}-out", run_id="r1")
+
     def test_write_output_preflights_numpy_frame_buffer(self, tmp_path):
         import numpy as np
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline

@@ -207,13 +207,14 @@ class LTX23MLXPipeline:
     def _expected_frame_shape(self) -> tuple[int, int, int, int]:
         return (self.frames, self.height, self.width, 3)
 
-    def _validate_frame_shape(self, frames: Any, phase: str) -> None:
+    def _validate_frame_shape(self, frames: Any, phase: str) -> tuple[int, int, int, int]:
         expected = self._expected_frame_shape()
         actual = _bounded_shape_tuple(frames, expected_rank=len(expected), label=f"LTX2.3 frames {phase}")
         if actual != expected:
             raise RuntimeError(
                 f"decoded LTX2.3 frames must have shape [T,H,W,3] {expected} for {phase}, got {actual}"
             )
+        return expected
 
     def _preflight_config_shape(self, config_path: Path) -> dict[str, Any] | None:
         if not config_path.exists():
@@ -947,12 +948,12 @@ class LTX23MLXPipeline:
             raise
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
-        self._validate_frame_shape(frames, "video_encode")
+        frame_shape = self._validate_frame_shape(frames, "video_encode")
         if self.dry_run or not self.save_video:
             return frames
 
         self._check_host_allocation(
-            _frame_postprocess_budget_bytes(frames),
+            _frame_postprocess_budget_bytes(frames, frame_shape=frame_shape),
             "video_encode frames",
         )
         self._check_memory("video_encode before")
@@ -990,9 +991,9 @@ class LTX23MLXPipeline:
             video.replace(output_path)
             return output_path
 
-        self._validate_frame_shape(video, "file_write")
+        frame_shape = self._validate_frame_shape(video, "file_write")
         self._check_host_allocation(
-            _frame_postprocess_budget_bytes(video),
+            _frame_postprocess_budget_bytes(video, frame_shape=frame_shape),
             "file_write frames",
         )
         if importlib.util.find_spec("mlx_video") is None:
@@ -1381,8 +1382,10 @@ def _map_ltx_text_encoder_weight_key(key: Any) -> str | None:
     return None
 
 
-def _frame_postprocess_budget_bytes(frames: Any) -> int:
-    shape_floor = math.prod(_bounded_shape_tuple(frames, expected_rank=4, label="LTX2.3 postprocess frames")) * 4
+def _frame_postprocess_budget_bytes(frames: Any, *, frame_shape: tuple[int, int, int, int] | None = None) -> int:
+    if frame_shape is None:
+        frame_shape = _bounded_shape_tuple(frames, expected_rank=4, label="LTX2.3 postprocess frames")
+    shape_floor = math.prod(frame_shape) * 4
     reported_nbytes = getattr(frames, "nbytes", 0)
     if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
         reported_nbytes = 0
