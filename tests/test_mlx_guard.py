@@ -407,6 +407,26 @@ class TestCheckMemoryGuard:
         with pytest.raises(MemoryGuardError, match="invalid memory telemetry"):
             check_memory_guard(label="invalid-telemetry")
 
+    @patch("fastgen_profiler.mlx_guard.system_snapshot")
+    def test_invalid_memory_telemetry_message_does_not_repr_unknown_values(self, mock_snap):
+        class UnsafeTelemetryValue:
+            def __repr__(self):
+                raise AssertionError("memory guard must not call repr on invalid telemetry")
+
+            def __str__(self):
+                raise AssertionError("memory guard must not call str on invalid telemetry")
+
+        mock_snap.return_value = SystemSnapshot(
+            free_bytes=UnsafeTelemetryValue(),
+            total_bytes=128 * 1024 ** 3,
+            pressure=0.1,
+            swap_files=0,
+            free_fraction=None,
+        )
+
+        with pytest.raises(MemoryGuardError, match="UnsafeTelemetryValue"):
+            check_memory_guard(label="invalid-telemetry")
+
 
 # ---------------------------------------------------------------------------
 # Runtime watchdog (Guard 3)
@@ -6172,6 +6192,24 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="shape rank exceeds"):
             pipe._check_tensor_shape_allocation(FakeTensor(), "unbounded tensor")
 
+    def test_ltx23_tensor_allocation_rejects_short_shape_metadata(self, tmp_path):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeTensor:
+            shape = (1, 128, 4, 64)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="shape rank is 4, expected 5"):
+            pipe._check_tensor_shape_allocation(FakeTensor(), "short tensor")
+
     def test_wan22_decode_preflights_output_tensor_before_vae_forward(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
 
@@ -6532,6 +6570,39 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             shape = Shape()
 
         with pytest.raises(RuntimeMemoryAbort, match="shape rank"):
+            validator(FakeFrames(), "decode")
+
+    @pytest.mark.parametrize("adapter", ["ltx", "wan"])
+    def test_adapter_shape_validation_rejects_short_shape_metadata(self, tmp_path, adapter):
+        if adapter == "ltx":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+            pipe = LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            validator = pipe._validate_frame_shape
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+            pipe = Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            validator = pipe._validate_frame_shape
+
+        class FakeFrames:
+            shape = (4, 256, 256)
+
+        with pytest.raises(RuntimeMemoryAbort, match="shape rank is 3, expected 4"):
             validator(FakeFrames(), "decode")
 
     @pytest.mark.parametrize("adapter", ["ltx", "wan"])

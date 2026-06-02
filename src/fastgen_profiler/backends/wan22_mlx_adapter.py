@@ -1023,6 +1023,11 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
                 "refusing unbounded shape inspection"
             )
         dims.append(dim)
+    if len(dims) != expected_rank:
+        _raise_runtime_abort(
+            f"{label} shape rank is {len(dims)}, expected {expected_rank}; "
+            "refusing under-bounded shape inspection"
+        )
     return tuple(dims)
 
 

@@ -285,29 +285,38 @@ def _is_unit_interval_number(value: object) -> bool:
     )
 
 
+def _safe_diagnostic_value(value: object) -> str:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
+
+
 def _invalid_system_snapshot_reasons(snap: SystemSnapshot) -> list[str]:
     """Return impossible memory telemetry values that must fail closed."""
     reasons: list[str] = []
 
     if snap.free_bytes is not None and not _is_non_negative_int(snap.free_bytes):
-        reasons.append(f"free_bytes must be a non-negative integer, got {snap.free_bytes!r}")
+        reasons.append(f"free_bytes must be a non-negative integer, got {_safe_diagnostic_value(snap.free_bytes)}")
     if snap.total_bytes is not None and not _is_positive_int(snap.total_bytes):
-        reasons.append(f"total_bytes must be a positive integer, got {snap.total_bytes!r}")
+        reasons.append(f"total_bytes must be a positive integer, got {_safe_diagnostic_value(snap.total_bytes)}")
     if (
         _is_non_negative_int(snap.free_bytes)
         and _is_positive_int(snap.total_bytes)
         and snap.free_bytes > snap.total_bytes
     ):
         reasons.append(
-            f"free_bytes cannot exceed total_bytes ({snap.free_bytes!r} > {snap.total_bytes!r})"
+            "free_bytes cannot exceed total_bytes "
+            f"({_safe_diagnostic_value(snap.free_bytes)} > {_safe_diagnostic_value(snap.total_bytes)})"
         )
     if snap.pressure is not None and not _is_unit_interval_number(snap.pressure):
-        reasons.append(f"pressure must be a finite number in [0, 1], got {snap.pressure!r}")
+        reasons.append(f"pressure must be a finite number in [0, 1], got {_safe_diagnostic_value(snap.pressure)}")
     if snap.swap_files is not None and not _is_non_negative_int(snap.swap_files):
-        reasons.append(f"swap_files must be a non-negative integer, got {snap.swap_files!r}")
+        reasons.append(f"swap_files must be a non-negative integer, got {_safe_diagnostic_value(snap.swap_files)}")
     if snap.free_fraction is not None and not _is_unit_interval_number(snap.free_fraction):
         reasons.append(
-            f"free_fraction must be a finite number in [0, 1], got {snap.free_fraction!r}"
+            "free_fraction must be a finite number in [0, 1], "
+            f"got {_safe_diagnostic_value(snap.free_fraction)}"
         )
 
     return reasons

@@ -353,6 +353,11 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
                 f"{_shape_dim_text(dim)} for {label}"
             )
         dims.append(dim)
+    if len(dims) != expected_rank:
+        raise RuntimeMemoryAbort(
+            f"decoded benchmark video shape rank is {len(dims)}, expected {expected_rank} for {label}; "
+            "refusing under-bounded shape inspection"
+        )
     return tuple(dims)
 
 
