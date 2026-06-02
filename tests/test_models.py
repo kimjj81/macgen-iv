@@ -209,6 +209,33 @@ def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
     assert cli_dir in dirs
 
 
+def test_model_dirs_from_env_rejects_oversized_value_before_split(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIRS=" + ("x" * 70_000) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS value exceeds 65536 chars"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_model_dirs_from_env_rejects_too_many_entries(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "FASTGEN_MODEL_DIRS=" + os.pathsep.join(f"/models/{index}" for index in range(1_025)) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIRS contains more than 1024 entries"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
+def test_model_dirs_from_env_rejects_oversized_entry(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FASTGEN_MODEL_DIR_WAN22=/models/" + ("x" * 5_000) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="FASTGEN_MODEL_DIR_WAN22 entry exceeds 4096 chars"):
+        model_dirs_from_sources(model="wan2.2", cli_dirs=[], env_file=env_file)
+
+
 def test_load_env_file_rejects_oversized_file_before_parsing(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("FASTGEN_MODEL_DIRS=/models\n", encoding="utf-8")

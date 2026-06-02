@@ -44,6 +44,9 @@ DEFAULT_ENV_FILE_MAX_BYTES = 1024 * 1024
 DEFAULT_MODEL_DISCOVERY_MAX_DIRS = 100_000
 DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES = 10_000
 DEFAULT_MODEL_DISCOVERY_MAX_FILES = 100_000
+DEFAULT_MODEL_DIRS_ENV_MAX_CHARS = 65_536
+DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES = 1_024
+DEFAULT_MODEL_DIR_PATH_MAX_CHARS = 4_096
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,12 +106,12 @@ def model_dirs_from_sources(
 ) -> list[Path]:
     env_values = load_env_file(env_file)
     dirs: list[Path] = []
-    dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIRS")))
+    dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIRS"), label="FASTGEN_MODEL_DIRS"))
 
     if model == "wan2.2":
-        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_WAN22")))
+        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_WAN22"), label="FASTGEN_MODEL_DIR_WAN22"))
     elif model == "ltx2.3":
-        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_LTX23")))
+        dirs.extend(_split_dirs(env_values.get("FASTGEN_MODEL_DIR_LTX23"), label="FASTGEN_MODEL_DIR_LTX23"))
 
     # Auto-discover from well-known sources (DrawThings, HuggingFace cache, etc.)
     dirs.extend(discover_import_dirs("all"))
@@ -288,11 +291,39 @@ def guess_model_family(path: Path) -> str:
     return "unknown"
 
 
-def _split_dirs(value: str | None) -> list[Path]:
+def _split_dirs(value: str | None, *, label: str = "FASTGEN_MODEL_DIRS") -> list[Path]:
     if not value:
         return []
-    normalized = value.replace(",", os.pathsep)
-    return [Path(part).expanduser() for part in normalized.split(os.pathsep) if part.strip()]
+    if len(value) > DEFAULT_MODEL_DIRS_ENV_MAX_CHARS:
+        raise ValueError(
+            f"{label} value exceeds {DEFAULT_MODEL_DIRS_ENV_MAX_CHARS} chars"
+        )
+    dirs: list[Path] = []
+    for part in _iter_model_dir_parts(value):
+        if len(dirs) >= DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES:
+            raise ValueError(
+                f"{label} contains more than {DEFAULT_MODEL_DIRS_ENV_MAX_ENTRIES} entries"
+            )
+        if len(part) > DEFAULT_MODEL_DIR_PATH_MAX_CHARS:
+            raise ValueError(
+                f"{label} entry exceeds {DEFAULT_MODEL_DIR_PATH_MAX_CHARS} chars"
+            )
+        dirs.append(Path(part).expanduser())
+    return dirs
+
+
+def _iter_model_dir_parts(value: str) -> Iterable[str]:
+    start = 0
+    for index, char in enumerate(value):
+        if char not in {",", os.pathsep}:
+            continue
+        part = value[start:index].strip()
+        if part:
+            yield part
+        start = index + 1
+    part = value[start:].strip()
+    if part:
+        yield part
 
 
 def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
