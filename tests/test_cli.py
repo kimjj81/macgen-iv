@@ -2537,6 +2537,86 @@ def test_models_import_fails_when_no_directories_found(tmp_path, monkeypatch, ca
     assert not env_file.exists()
 
 
+def test_models_convert_wan_dry_run_prints_command_without_running(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "Wan2.2-TI2V-5B"
+    source.mkdir()
+    output_dir = tmp_path / "Wan2.2-TI2V-5B-MLX"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli_module.subprocess, "run", lambda command, check: calls.append(command))
+
+    exit_code = main(
+        [
+            "models",
+            "convert",
+            "--model",
+            "wan2.2",
+            "--source",
+            str(source),
+            "--output-dir",
+            str(output_dir),
+            "--quantize",
+            "--bits",
+            "4",
+            "--group-size",
+            "64",
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "mlx_video.models.wan_2.convert" in output
+    assert "--checkpoint-dir" in output
+    assert "--quantize" in output
+    assert calls == []
+
+
+def test_models_convert_ltx_runs_and_registers_output_dir(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "ltx_2.3_22b_distilled_1.1_q6p.safetensors"
+    source.write_bytes(b"weights")
+    output_dir = tmp_path / "LTX-2.3-MLX"
+    env_file = tmp_path / ".env"
+    commands: list[list[str]] = []
+    monkeypatch.setattr(cli_module, "_conversion_preflight_guard", lambda model: None)
+
+    class Result:
+        returncode = 0
+
+    def run(command, check):
+        commands.append(command)
+        output_dir.mkdir()
+        return Result()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", run)
+
+    exit_code = main(
+        [
+            "models",
+            "convert",
+            "--model",
+            "ltx2.3",
+            "--source",
+            str(source),
+            "--output-dir",
+            str(output_dir),
+            "--variant",
+            "distilled",
+            "--register",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert commands
+    assert "mlx_video.models.ltx_2.convert" in commands[0]
+    assert "--source" in commands[0]
+    assert "--output" in commands[0]
+    assert f"FASTGEN_MODEL_DIRS={output_dir.resolve()}" in env_file.read_text(encoding="utf-8")
+    assert "Updated" in output
+
+
 def test_interactive_main_menu_can_import_model_dirs(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))

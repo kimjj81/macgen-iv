@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import importlib.util
 import logging
 import math
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Annotated
@@ -42,6 +44,7 @@ from .models import (
     direct_model_candidate,
     discover_import_dirs,
     discover_models,
+    merge_model_dirs_into_env,
     model_dirs_env_value,
     model_dirs_from_sources,
     replace_model_dirs_in_env,
@@ -299,6 +302,38 @@ def models_import(
             env_file=env_file,
             dry_run=dry_run,
             require_confirmation=False,
+        )
+    )
+
+
+@models_app.command("convert")
+def models_convert(
+    model: Annotated[str, typer.Option("--model", case_sensitive=False)] = ...,
+    source: Annotated[str, typer.Option("--source")] = ...,
+    output_dir: Annotated[Path, typer.Option("--output-dir")] = ...,
+    env_file: Annotated[Path, typer.Option("--env-file")] = Path(".env"),
+    variant: Annotated[str, typer.Option("--variant", case_sensitive=False)] = "distilled",
+    dtype: Annotated[str, typer.Option("--dtype", case_sensitive=False)] = "bfloat16",
+    quantize: Annotated[bool, typer.Option("--quantize")] = False,
+    bits: Annotated[int, typer.Option("--bits")] = 4,
+    group_size: Annotated[int, typer.Option("--group-size")] = 64,
+    register: Annotated[bool, typer.Option("--register")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    model = _validate_choice(model, MODEL_CHOICES, "model")
+    raise typer.Exit(
+        _convert_model_dir(
+            model=model,
+            source=source,
+            output_dir=output_dir,
+            env_file=env_file,
+            variant=variant,
+            dtype=dtype,
+            quantize=quantize,
+            bits=bits,
+            group_size=group_size,
+            register=register,
+            dry_run=dry_run,
         )
     )
 
@@ -1956,6 +1991,150 @@ def _import_model_dirs(
     replacement = replace_model_dirs_in_env(env_file, replacement_preview)
     typer.echo(f"Updated {env_file}: {len(replacement)} model directories registered.")
     return 0
+
+
+def _convert_model_dir(
+    *,
+    model: str,
+    source: str,
+    output_dir: Path,
+    env_file: Path,
+    variant: str,
+    dtype: str,
+    quantize: bool,
+    bits: int,
+    group_size: int,
+    register: bool,
+    dry_run: bool,
+) -> int:
+    if model == "wan2.2":
+        command = _wan_conversion_command(
+            source=source,
+            output_dir=output_dir,
+            dtype=dtype,
+            quantize=quantize,
+            bits=bits,
+            group_size=group_size,
+        )
+    else:
+        command = _ltx_conversion_command(
+            source=source,
+            output_dir=output_dir,
+            variant=variant,
+        )
+    if command is None:
+        return 1
+
+    typer.echo("Conversion command:")
+    typer.echo(" ".join(command))
+    if dry_run:
+        if register:
+            typer.echo("Dry run: conversion was not run and .env was not modified.")
+        else:
+            typer.echo("Dry run: conversion was not run.")
+        return 0
+
+    guard_error = _conversion_preflight_guard(model)
+    if guard_error is not None:
+        typer.echo(f"[guard] conversion blocked: {guard_error}")
+        return 1
+
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        typer.echo(f"[guard] conversion failed to start: {_safe_exception_text(exc)}")
+        return 1
+    if result.returncode != 0:
+        typer.echo(f"[guard] conversion failed with exit code {result.returncode}")
+        return result.returncode
+
+    typer.echo(f"Converted {model} model to {output_dir}")
+    if register:
+        try:
+            merged = merge_model_dirs_into_env(env_file, [output_dir.expanduser().resolve()])
+        except ValueError as exc:
+            typer.echo(f"[guard] register blocked: {_safe_exception_text(exc)}")
+            return 1
+        typer.echo(f"Updated {env_file}: {len(merged)} model directories registered.")
+    return 0
+
+
+def _wan_conversion_command(
+    *,
+    source: str,
+    output_dir: Path,
+    dtype: str,
+    quantize: bool,
+    bits: int,
+    group_size: int,
+) -> list[str] | None:
+    dtype = _validate_choice(dtype, ("float16", "float32", "bfloat16"), "dtype")
+    if bits not in {4, 8}:
+        typer.echo("[guard] conversion blocked: bits must be one of: 4, 8")
+        return None
+    if group_size not in {32, 64, 128}:
+        typer.echo("[guard] conversion blocked: group-size must be one of: 32, 64, 128")
+        return None
+    source_path = Path(source).expanduser()
+    if not source_path.exists() or not source_path.is_dir():
+        typer.echo(
+            "[guard] conversion blocked: Wan2.2 source must be a local checkpoint directory "
+            f"before conversion: {source}"
+        )
+        return None
+    command = [
+        sys.executable,
+        "-m",
+        "mlx_video.models.wan_2.convert",
+        "--checkpoint-dir",
+        str(source_path),
+        "--output-dir",
+        str(output_dir),
+        "--model-version",
+        "2.2",
+        "--dtype",
+        dtype,
+    ]
+    if quantize:
+        command.extend(["--quantize", "--bits", str(bits), "--group-size", str(group_size)])
+    return command
+
+
+def _ltx_conversion_command(
+    *,
+    source: str,
+    output_dir: Path,
+    variant: str,
+) -> list[str] | None:
+    variant = _validate_choice(variant, ("distilled", "dev"), "variant")
+    return [
+        sys.executable,
+        "-m",
+        "mlx_video.models.ltx_2.convert",
+        "--source",
+        source,
+        "--output",
+        str(output_dir),
+        "--variant",
+        variant,
+    ]
+
+
+def _conversion_preflight_guard(model: str) -> str | None:
+    module_name = "mlx_video.models.wan_2.convert" if model == "wan2.2" else "mlx_video.models.ltx_2.convert"
+    try:
+        module_available = importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        module_available = False
+    if not module_available:
+        return f"{module_name} unavailable; install the mlx extra before converting"
+    try:
+        from fastgen_profiler.mlx_guard import check_memory_guard
+
+        check_memory_guard(label=f"{model} conversion")
+    except Exception as exc:
+        return _safe_exception_text(exc)
+    return None
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
