@@ -675,6 +675,10 @@ def check_host_allocation_headroom(
     reserve_bytes: int = DEFAULT_SYSTEM_RESERVE_BYTES,
 ) -> SystemSnapshot:
     """Abort before large CPU-side allocations when system headroom is tight."""
+    if not isinstance(required_bytes, int) or isinstance(required_bytes, bool) or required_bytes <= 0:
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: required_bytes must be a positive integer, got {required_bytes!r}"
+        )
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
     snap = system_snapshot()
     required_with_reserve = required_bytes + reserve_bytes
@@ -835,12 +839,15 @@ def check_token_sequence_budget(
     label: str = "",
 ) -> dict[str, object]:
     """Reject oversized token sequences before text-encoder MLX arrays."""
-    if token_count <= 0:
-        raise MemoryGuardError(f"Memory guard [{label}]: token_count must be positive, got {token_count}")
-    if max_tokens <= 0:
-        raise MemoryGuardError(f"Memory guard [{label}]: max_tokens must be positive, got {max_tokens}")
-    if hidden_size <= 0:
-        raise MemoryGuardError(f"Memory guard [{label}]: hidden_size must be positive, got {hidden_size}")
+    for name, value in (
+        ("token_count", token_count),
+        ("max_tokens", max_tokens),
+        ("hidden_size", hidden_size),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise MemoryGuardError(
+                f"Memory guard [{label}]: {name} must be a positive integer, got {value!r}"
+            )
     if token_count > max_tokens:
         raise MemoryGuardError(
             f"Memory guard [{label}]: token sequence is {token_count} tokens, "

@@ -40,6 +40,9 @@ from fastgen_profiler.mlx_guard import (
 )
 
 
+PNG_FRAME_ALLOCATION_MULTIPLIER = 4
+
+
 def _env_positive_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -213,7 +216,10 @@ def run_single(steps: int):
     result["pixel_std"] = round(float(video.std()), 2)
 
     # Save frames as PNG
-    check_host_allocation_headroom(video.nbytes * 2, label=f"{label} png frames")
+    check_host_allocation_headroom(
+        video.nbytes * PNG_FRAME_ALLOCATION_MULTIPLIER,
+        label=f"{label} png frames",
+    )
     from PIL import Image
     img = None
     for idx in range(video.shape[0]):

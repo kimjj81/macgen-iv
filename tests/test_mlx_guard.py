@@ -1050,6 +1050,11 @@ class TestAllocationBudget:
         with pytest.raises(RuntimeMemoryAbort, match="host allocation"):
             check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
 
+    @pytest.mark.parametrize("required_bytes", [0, -1, 1.5, True, "1024"])
+    def test_host_allocation_rejects_invalid_required_bytes(self, required_bytes):
+        with pytest.raises(MemoryGuardError, match="required_bytes must be a positive integer"):
+            check_host_allocation_headroom(required_bytes, label="numpy")  # type: ignore[arg-type]
+
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_host_allocation_fails_closed_when_swap_telemetry_missing(
@@ -1205,6 +1210,21 @@ class TestAllocationBudget:
         guard.assert_called_once_with(4 * 16 * 4 * 4, label="text token hidden states")
         assert result["token_count"] == 4
         assert result["max_tokens"] == 8
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"token_count": 0, "max_tokens": 8, "hidden_size": 16}, "token_count must be a positive integer"),
+            ({"token_count": True, "max_tokens": 8, "hidden_size": 16}, "token_count must be a positive integer"),
+            ({"token_count": 4, "max_tokens": 0, "hidden_size": 16}, "max_tokens must be a positive integer"),
+            ({"token_count": 4, "max_tokens": 8.5, "hidden_size": 16}, "max_tokens must be a positive integer"),
+            ({"token_count": 4, "max_tokens": 8, "hidden_size": False}, "hidden_size must be a positive integer"),
+            ({"token_count": 4, "max_tokens": 8, "hidden_size": "16"}, "hidden_size must be a positive integer"),
+        ],
+    )
+    def test_token_sequence_budget_rejects_invalid_integer_inputs(self, kwargs, message):
+        with pytest.raises(MemoryGuardError, match=message):
+            check_token_sequence_budget(label="text", **kwargs)  # type: ignore[arg-type]
 
 
 class TestInterRunRecovery:
@@ -4747,6 +4767,66 @@ import fastgen_profiler.backends.wan22_mlx_adapter
                 ltx.write_output(frames, tmp_path / "ltx-out", run_id="r1")
             with pytest.raises(RuntimeMemoryAbort, match="write too large"):
                 wan.write_output(frames, tmp_path / "wan-out", run_id="r1")
+
+    def test_video_postprocess_uses_conservative_frame_buffer_budget(self, tmp_path, monkeypatch):
+        import numpy as np
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        frames = np.zeros((4, 256, 256, 3), dtype=np.uint8)
+        expected = frames.nbytes * 6
+        ltx = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        wan = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        captures: list[tuple[str, int, str]] = []
+
+        for name, pipe in (("ltx", ltx), ("wan", wan)):
+            pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+
+            def capture(required_bytes: int, phase: str, *, pipe_name: str = name) -> None:
+                captures.append((pipe_name, required_bytes, phase))
+
+            pipe._check_host_allocation = capture  # type: ignore[method-assign]
+
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.wan22_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+
+        for action in (
+            lambda: ltx.encode_video(frames, fps=24),
+            lambda: wan.encode_video(frames, fps=24),
+            lambda: ltx.write_output(frames, tmp_path / "ltx-out", run_id="r1"),
+            lambda: wan.write_output(frames, tmp_path / "wan-out", run_id="r1"),
+        ):
+            with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+                action()
+
+        assert captures == [
+            ("ltx", expected, "video_encode frames"),
+            ("wan", expected, "video_encode frames"),
+            ("ltx", expected, "file_write frames"),
+            ("wan", expected, "file_write frames"),
+        ]
 
     def test_video_postprocess_import_waits_for_mlx_runtime_guard(self, tmp_path, monkeypatch):
         import numpy as np

@@ -426,7 +426,7 @@ def test_steps_benchmark_run_single_preflights_png_frame_save(tmp_path, monkeypa
     result = module.run_single(1)
 
     assert result["video_shape"] == [2, 4, 4, 3]
-    assert host_checks == [(2 * 4 * 4 * 3 * 2, "steps_1 png frames")]
+    assert host_checks == [(2 * 4 * 4 * 3 * module.PNG_FRAME_ALLOCATION_MULTIPLIER, "steps_1 png frames")]
     assert len(saved) == 2
 
 

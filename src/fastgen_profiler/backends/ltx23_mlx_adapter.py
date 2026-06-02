@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 
+_VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
+
+
 def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
     if isinstance(parameters, dict):
         result: set[str] = set()
@@ -889,7 +892,10 @@ class LTX23MLXPipeline:
         if self.dry_run or not self.save_video:
             return frames
 
-        self._check_host_allocation(frames.nbytes * 2, "video_encode frames")
+        self._check_host_allocation(
+            frames.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            "video_encode frames",
+        )
         self._check_memory("video_encode before")
         if importlib.util.find_spec("mlx_video") is None:
             raise ModuleNotFoundError(
@@ -926,7 +932,10 @@ class LTX23MLXPipeline:
             return output_path
 
         self._validate_frame_shape(video, "file_write")
-        self._check_host_allocation(video.nbytes * 2, "file_write frames")
+        self._check_host_allocation(
+            video.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            "file_write frames",
+        )
         if importlib.util.find_spec("mlx_video") is None:
             raise ModuleNotFoundError(
                 "mlx_video is required for LTX2.3 video postprocess; dependency check "

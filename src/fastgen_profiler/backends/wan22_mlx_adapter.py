@@ -20,6 +20,9 @@ from types import SimpleNamespace
 from typing import Any
 
 
+_VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
+
+
 def _require_non_empty_parameters(component: Any, label: str) -> Any:
     try:
         parameters = component.parameters()
@@ -627,7 +630,10 @@ class Wan22MLXPipeline:
         if self.dry_run or not self.save_video:
             return frames
 
-        self._check_host_allocation(frames.nbytes * 2, "video_encode frames")
+        self._check_host_allocation(
+            frames.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            "video_encode frames",
+        )
         self._check_memory("video_encode before")
         if importlib.util.find_spec("mlx_video") is None:
             raise ModuleNotFoundError(
@@ -665,7 +671,10 @@ class Wan22MLXPipeline:
 
         fps = self.config.sample_fps if self.config is not None else self.fps
         self._validate_frame_shape(video, "file_write")
-        self._check_host_allocation(video.nbytes * 2, "file_write frames")
+        self._check_host_allocation(
+            video.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            "file_write frames",
+        )
         if importlib.util.find_spec("mlx_video") is None:
             raise ModuleNotFoundError(
                 "mlx_video is required for Wan2.2 video postprocess; dependency check "

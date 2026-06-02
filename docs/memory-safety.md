@@ -57,6 +57,9 @@ and clean up; unknown memory state during MLX/Metal work is unsafe.
 Large host allocation preflights must follow the same macOS telemetry rule:
 unknown pressure or swap telemetry, or critical pressure, must abort before
 large file reads, tensor materialization, NumPy conversion, or video encoding.
+Video postprocess and frame export preflights must reserve more than the input
+frame buffer because lower-level encoders and image writers may allocate
+contiguous, converted, or temporary buffers outside MLX allocator counters.
 
 ## Direct Scripts
 
