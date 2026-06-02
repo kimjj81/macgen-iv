@@ -356,8 +356,63 @@ def test_measurement_record_bounds_before_deepcopying_metadata():
         seconds=0.0,
     ).to_dict()
 
-    assert "<truncated>" in record["machine"]["object"]
+    assert "DeepcopyBlocked" in record["machine"]["object"]
     assert len(record["machine"]["object"]) <= MAX_METRIC_TEXT_FIELD_CHARS
+
+
+def test_measurement_record_summarizes_unknown_metric_values_without_repr_or_str():
+    class UnsafeValue:
+        def __repr__(self):
+            raise AssertionError("metric serialization must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("metric serialization must not call str on unknown values")
+
+    class UnsafeKey:
+        def __repr__(self):
+            raise AssertionError("metric serialization must not call repr on unknown keys")
+
+        def __str__(self):
+            raise AssertionError("metric serialization must not call str on unknown keys")
+
+    config = RunConfig(
+        model="wan2.2",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=Path("unused"),
+        result_jsonl=Path("unused.jsonl"),
+        save_video=False,
+        dry_run=True,
+    )
+
+    record = make_record(
+        config,
+        run_id="run",
+        timestamp_utc="2026-01-01T00:00:00Z",
+        machine={
+            "value": UnsafeValue(),
+            UnsafeKey(): "keyed",
+        },
+        phase="total",
+        seconds=0.0,
+    ).to_dict()
+
+    assert "UnsafeValue" in record["machine"]["value"]
+    assert any("UnsafeKey" in key for key in record["machine"])
 
 
 def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():

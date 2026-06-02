@@ -237,7 +237,7 @@ def _bound_metric_value(value: Any) -> Any:
             if index >= MAX_METRIC_COLLECTION_ITEMS:
                 bounded["__truncated_items__"] = True
                 break
-            bounded[_bound_metric_text(str(key))] = _bound_metric_value(item)
+            bounded[_safe_metric_text(key)] = _bound_metric_value(item)
         return bounded
     if isinstance(value, list):
         return _bound_metric_sequence(value)
@@ -245,7 +245,16 @@ def _bound_metric_value(value: Any) -> Any:
         return _bound_metric_sequence(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _bound_metric_text(repr(value))
+    return _safe_metric_text(value)
+
+
+def _safe_metric_text(value: Any) -> str:
+    if isinstance(value, str):
+        return _bound_metric_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return _bound_metric_text(str(value))
+    value_type = type(value)
+    return _bound_metric_text(f"<{value_type.__module__}.{value_type.__qualname__}>")
 
 
 def _bound_metric_text(value: str) -> str:
