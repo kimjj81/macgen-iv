@@ -4273,6 +4273,56 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             with pytest.raises(RuntimeMemoryAbort, match="stop before wan work"):
                 pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none")
 
+    @pytest.mark.parametrize(
+        ("step_index", "steps"),
+        [
+            (-1, 1),
+            (1, 1),
+            (0, 0),
+            (0, 513),
+            (True, 1),
+            (0, True),
+        ],
+    )
+    def test_wan22_denoise_rejects_invalid_step_arguments_before_work(
+        self,
+        tmp_path,
+        monkeypatch,
+        step_index,
+        steps,
+    ):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeLatents:
+            shape = (16, 1, 1, 1)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = object()
+        pipe.model = object()
+        pipe.scheduler = object()
+        pipe.latent_shape = (16, 1, 1, 1)
+        pipe.seq_len = 1
+        pipe.cross_kv = object()
+        pipe.rope_cos_sin = object()
+        pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("memory check must not run for invalid denoise arguments")
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="Wan2.2 denoise step arguments"):
+            pipe.denoise_step(FakeLatents(), step_index=step_index, steps=steps, guidance=1.0, cache="none")
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_ltx23_denoise_checks_memory_before_work(self, tmp_path):
         pytest.importorskip("mlx_video.models.ltx_2.config")
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -4293,6 +4343,52 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         ):
             with pytest.raises(RuntimeMemoryAbort, match="stop before ltx work"):
                 pipe.denoise_step(object(), step_index=0, steps=1, guidance=1.0, cache="none")
+
+    @pytest.mark.parametrize(
+        ("step_index", "steps"),
+        [
+            (-1, 1),
+            (1, 1),
+            (0, 0),
+            (0, 513),
+            (True, 1),
+            (0, True),
+        ],
+    )
+    def test_ltx23_denoise_rejects_invalid_step_arguments_before_work(
+        self,
+        tmp_path,
+        monkeypatch,
+        step_index,
+        steps,
+    ):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        class FakeLatents:
+            dtype = "float32"
+            shape = (1, 128, 4, 32, 32)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", lambda: cleanup_calls.append("cleanup"))
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._check_memory = lambda phase: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("memory check must not run for invalid denoise arguments")
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="LTX2.3 denoise step arguments"):
+            pipe.denoise_step(FakeLatents(), step_index=step_index, steps=steps, guidance=1.0, cache="none")
+
+        assert cleanup_calls == ["cleanup"]
 
     def test_wan22_file_preflight_uses_file_size_before_loading(self, tmp_path):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
@@ -5518,6 +5614,93 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeError, match="decoded Wan2.2 frames must have shape"):
             pipe.decode(FakeLatents())
+
+    @pytest.mark.parametrize("adapter", ["ltx", "wan"])
+    def test_adapter_shape_validation_rejects_unbounded_shape_metadata(self, tmp_path, adapter):
+        if adapter == "ltx":
+            from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+            pipe = LTX23MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            expected = (4, 256, 256, 3, 1)
+            validator = pipe._validate_frame_shape
+        else:
+            from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+            pipe = Wan22MLXPipeline(
+                model_path=tmp_path,
+                seed=1,
+                width=256,
+                height=256,
+                frames=4,
+                steps=1,
+            )
+            expected = (4, 256, 256, 3, 1)
+            validator = pipe._validate_frame_shape
+
+        class Shape:
+            def __iter__(self):
+                yield from expected
+                raise AssertionError("shape validator must not consume beyond expected rank")
+
+        class FakeFrames:
+            shape = Shape()
+
+        with pytest.raises(RuntimeMemoryAbort, match="shape rank"):
+            validator(FakeFrames(), "decode")
+
+    @pytest.mark.parametrize(
+        ("step_index", "steps", "message"),
+        [
+            (0, 0, "steps must be positive"),
+            (0, 513, "exceeds safe maximum"),
+            (-1, 1, "step_index=-1 must be in"),
+            (1, 1, "step_index=1 must be in"),
+            (False, 1, "step_index must be an integer"),
+            (0, True, "steps must be an integer"),
+        ],
+    )
+    def test_ltx23_denoise_rejects_invalid_step_arguments_before_mlx_import(
+        self,
+        tmp_path,
+        monkeypatch,
+        step_index,
+        steps,
+        message,
+    ):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
+
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"mlx", "mlx.core"} or name.startswith("mlx_video"):
+                raise AssertionError("invalid denoise step arguments must be rejected before MLX import")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(RuntimeMemoryAbort, match=message):
+            pipe.denoise_step(FakeLatents(), step_index=step_index, steps=steps, guidance=1.0, cache="none")
 
     def test_video_encode_preflights_frame_buffer(self, tmp_path):
         import numpy as np

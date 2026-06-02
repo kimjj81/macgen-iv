@@ -22,6 +22,7 @@ _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 _MAX_PRELOAD_SCAN_DIRS = 10_000
 _MAX_PRELOAD_SCAN_FILES = 10_000
+_MAX_DENOISE_STEPS = 512
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
@@ -170,20 +171,43 @@ class LTX23MLXPipeline:
             )
 
     def _validate_latents_shape(self, latents: Any, phase: str) -> None:
-        actual = tuple(getattr(latents, "shape", ()))
         expected = self._expected_latent_shape()
+        actual = _bounded_shape_tuple(latents, expected_rank=len(expected), label=f"LTX2.3 latent {phase}")
         if actual != expected:
             raise RuntimeError(
                 f"latent shape {actual} for {phase} does not match expected {expected}; "
                 "refusing to allocate derived MLX tensors for an unexpected run shape"
             )
 
+    def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
+        if not isinstance(steps, int) or isinstance(steps, bool):
+            _raise_runtime_abort(
+                f"LTX2.3 denoise step arguments are invalid: steps must be an integer, got {steps!r}"
+            )
+        if steps <= 0:
+            _raise_runtime_abort(
+                f"LTX2.3 denoise step arguments are invalid: steps must be positive, got {steps}"
+            )
+        if steps > _MAX_DENOISE_STEPS:
+            _raise_runtime_abort(
+                f"LTX2.3 denoise step arguments are invalid: steps={steps} exceeds safe maximum "
+                f"{_MAX_DENOISE_STEPS}"
+            )
+        if not isinstance(step_index, int) or isinstance(step_index, bool):
+            _raise_runtime_abort(
+                f"LTX2.3 denoise step arguments are invalid: step_index must be an integer, got {step_index!r}"
+            )
+        if step_index < 0 or step_index >= steps:
+            _raise_runtime_abort(
+                f"LTX2.3 denoise step arguments are invalid: step_index={step_index} must be in [0, {steps})"
+            )
+
     def _expected_frame_shape(self) -> tuple[int, int, int, int]:
         return (self.frames, self.height, self.width, 3)
 
     def _validate_frame_shape(self, frames: Any, phase: str) -> None:
-        actual = tuple(getattr(frames, "shape", ()))
         expected = self._expected_frame_shape()
+        actual = _bounded_shape_tuple(frames, expected_rank=len(expected), label=f"LTX2.3 frames {phase}")
         if actual != expected:
             raise RuntimeError(
                 f"decoded LTX2.3 frames must have shape [T,H,W,3] {expected} for {phase}, got {actual}"
@@ -733,9 +757,11 @@ class LTX23MLXPipeline:
         """Single denoise step matching official denoise_distilled logic."""
         if self.model is None or self.config is None:
             raise RuntimeError("denoise_step called before load_model")
-        self._validate_latents_shape(latents, f"denoise {step_index + 1}/{steps}")
+        self._validate_denoise_step_args(step_index=step_index, steps=steps)
+        phase = f"denoise {step_index + 1}/{steps}"
+        self._validate_latents_shape(latents, phase)
 
-        self._check_memory(f"denoise {step_index + 1}/{steps} before")
+        self._check_memory(f"{phase} before")
         self._ensure_mlx_runtime_ready("denoise")
 
         try:
@@ -755,7 +781,7 @@ class LTX23MLXPipeline:
             )
             self._check_host_allocation(
                 denoise_floor_bytes,
-                f"denoise {step_index + 1}/{steps} tensors",
+                f"{phase} tensors",
             )
 
             # Compute sigma schedule (linear 1.0 → 0.0)
@@ -796,7 +822,7 @@ class LTX23MLXPipeline:
 
             # Forward pass → velocity prediction
             velocity, _ = self.model(video=modality, audio=None)
-            self._eval_mlx(mx, velocity, phase=f"denoise {step_index + 1}/{steps} velocity")
+            self._eval_mlx(mx, velocity, phase=f"{phase} velocity")
 
             # Velocity → denoised (x0): x0 = latent - timestep * velocity
             sigma_f32 = mx.array(sigma, dtype=mx.float32)
@@ -805,7 +831,7 @@ class LTX23MLXPipeline:
             x0_f32 = latents_flat_f32 - timesteps_f32 * velocity.astype(mx.float32)
             denoised = mx.reshape(mx.transpose(x0_f32, (0, 2, 1)), (b, c, f, h, w))
 
-            self._eval_mlx(mx, denoised, phase=f"denoise {step_index + 1}/{steps} denoised")
+            self._eval_mlx(mx, denoised, phase=f"{phase} denoised")
 
             # Euler step
             if sigma_next > 0:
@@ -814,9 +840,9 @@ class LTX23MLXPipeline:
             else:
                 next_latents = denoised
 
-            self._eval_mlx(mx, next_latents, phase=f"denoise {step_index + 1}/{steps} next_latents")
+            self._eval_mlx(mx, next_latents, phase=f"{phase} next_latents")
             next_latents = next_latents.astype(dtype)
-            self._check_memory(f"denoise {step_index + 1}/{steps} after")
+            self._check_memory(f"{phase} after")
             return next_latents
         except Exception as exc:
             _cleanup_loaded_runtime_after_error(exc)
@@ -1172,8 +1198,30 @@ def _numpy() -> Any:
     return np
 
 
+def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        _raise_runtime_abort(f"{label} has no shape; refusing unbounded shape inspection")
+    dims: list[int] = []
+    try:
+        iterator = iter(shape)
+    except TypeError:
+        _raise_runtime_abort(f"{label} shape is not iterable; refusing unbounded shape inspection")
+    for dim in iterator:
+        if len(dims) >= expected_rank:
+            _raise_runtime_abort(
+                f"{label} shape rank exceeds {expected_rank}; refusing unbounded shape inspection"
+            )
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            _raise_runtime_abort(
+                f"{label} shape contains non-integer dimension {dim!r}; refusing unbounded shape inspection"
+            )
+        dims.append(dim)
+    return tuple(dims)
+
+
 def _frame_postprocess_budget_bytes(frames: Any) -> int:
-    shape_floor = math.prod(tuple(frames.shape)) * 4
+    shape_floor = math.prod(_bounded_shape_tuple(frames, expected_rank=4, label="LTX2.3 postprocess frames")) * 4
     reported_nbytes = getattr(frames, "nbytes", 0)
     if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
         reported_nbytes = 0

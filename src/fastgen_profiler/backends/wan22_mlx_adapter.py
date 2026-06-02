@@ -25,6 +25,7 @@ _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 _MAX_PRELOAD_SCAN_FILES = 10_000
 _MAX_CONFIG_DIMENSION = 65_536
 _MAX_CONFIG_AREA = 4096 * 4096
+_MAX_DENOISE_STEPS = 512
 
 
 def _require_non_empty_parameters(component: Any, label: str) -> Any:
@@ -183,8 +184,8 @@ class Wan22MLXPipeline:
         return (self.frames, self.height, self.width, 3)
 
     def _validate_frame_shape(self, frames: Any, phase: str) -> None:
-        actual = tuple(getattr(frames, "shape", ()))
         expected = self._expected_frame_shape()
+        actual = _bounded_shape_tuple(frames, expected_rank=len(expected), label=f"Wan2.2 frames {phase}")
         if actual != expected:
             raise RuntimeError(
                 f"decoded Wan2.2 frames must have shape [T,H,W,3] {expected} for {phase}, got {actual}"
@@ -202,11 +203,34 @@ class Wan22MLXPipeline:
     def _validate_latents_shape(self, latents: Any, phase: str) -> None:
         if self.latent_shape is None:
             raise RuntimeError(f"{phase} called before latent shape was initialized")
-        actual = tuple(getattr(latents, "shape", ()))
         expected = self.latent_shape
+        actual = _bounded_shape_tuple(latents, expected_rank=len(expected), label=f"Wan2.2 latent {phase}")
         if actual != expected:
             raise RuntimeError(
                 f"Wan2.2 latent shape {actual} does not match expected {expected} for {phase}"
+            )
+
+    def _validate_denoise_step_args(self, *, step_index: int, steps: int) -> None:
+        if not isinstance(steps, int) or isinstance(steps, bool):
+            _raise_runtime_abort(
+                f"Wan2.2 denoise step arguments are invalid: steps must be an integer, got {steps!r}"
+            )
+        if steps <= 0:
+            _raise_runtime_abort(
+                f"Wan2.2 denoise step arguments are invalid: steps must be positive, got {steps}"
+            )
+        if steps > _MAX_DENOISE_STEPS:
+            _raise_runtime_abort(
+                f"Wan2.2 denoise step arguments are invalid: steps={steps} exceeds safe maximum "
+                f"{_MAX_DENOISE_STEPS}"
+            )
+        if not isinstance(step_index, int) or isinstance(step_index, bool):
+            _raise_runtime_abort(
+                f"Wan2.2 denoise step arguments are invalid: step_index must be an integer, got {step_index!r}"
+            )
+        if step_index < 0 or step_index >= steps:
+            _raise_runtime_abort(
+                f"Wan2.2 denoise step arguments are invalid: step_index={step_index} must be in [0, {steps})"
             )
 
     def _validate_loaded_config(self) -> None:
@@ -540,17 +564,19 @@ class Wan22MLXPipeline:
             raise RuntimeError("denoise_step called before load_model")
         if self.seq_len is None or self.cross_kv is None or self.rope_cos_sin is None:
             raise RuntimeError("denoise_step called before encode_text")
+        self._validate_denoise_step_args(step_index=step_index, steps=steps)
+        phase = f"denoise {step_index + 1}/{steps}"
 
         try:
-            self._validate_latents_shape(latents, f"denoise {step_index + 1}/{steps}")
-            self._check_memory(f"denoise {step_index + 1}/{steps} before")
+            self._validate_latents_shape(latents, phase)
+            self._check_memory(f"{phase} before")
             timestep_val = self.scheduler.timesteps.tolist()[step_index]
             latent_shape = getattr(latents, "shape", None)
             if latent_shape is not None:
                 cfg_factor = 1 if self.cfg_disabled else 2
                 self._check_mlx_tensor_floor(
                     math.prod(latent_shape) * cfg_factor,
-                    f"denoise {step_index + 1}/{steps} tensors",
+                    f"{phase} tensors",
                     multiplier=8,
                 )
             if self.cfg_disabled:
@@ -581,8 +607,8 @@ class Wan22MLXPipeline:
 
             next_latents = self.scheduler.step(noise_pred[None], timestep_val, latents[None]).squeeze(0)
             del noise_pred
-            self._eval_mlx(self.mx, next_latents, phase=f"denoise {step_index + 1}/{steps} next_latents")
-            self._check_memory(f"denoise {step_index + 1}/{steps} after")
+            self._eval_mlx(self.mx, next_latents, phase=f"{phase} next_latents")
+            self._check_memory(f"{phase} after")
             return next_latents
         except Exception as exc:
             _cleanup_loaded_runtime_after_error(exc)
@@ -926,8 +952,30 @@ def _numpy() -> Any:
     return np
 
 
+def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        _raise_runtime_abort(f"{label} has no shape; refusing unbounded shape inspection")
+    dims: list[int] = []
+    try:
+        iterator = iter(shape)
+    except TypeError:
+        _raise_runtime_abort(f"{label} shape is not iterable; refusing unbounded shape inspection")
+    for dim in iterator:
+        if len(dims) >= expected_rank:
+            _raise_runtime_abort(
+                f"{label} shape rank exceeds {expected_rank}; refusing unbounded shape inspection"
+            )
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            _raise_runtime_abort(
+                f"{label} shape contains non-integer dimension {dim!r}; refusing unbounded shape inspection"
+            )
+        dims.append(dim)
+    return tuple(dims)
+
+
 def _frame_postprocess_budget_bytes(frames: Any) -> int:
-    shape_floor = math.prod(tuple(frames.shape)) * 4
+    shape_floor = math.prod(_bounded_shape_tuple(frames, expected_rank=4, label="Wan2.2 postprocess frames")) * 4
     reported_nbytes = getattr(frames, "nbytes", 0)
     if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
         reported_nbytes = 0
