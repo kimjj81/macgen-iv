@@ -3499,6 +3499,109 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="text projection weights did not match"):
             pipe.encode_text({"prompt": "prompt", "negative_prompt": ""})
 
+    def test_ltx23_encode_text_streams_text_projection_weight_filter(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        model_path = tmp_path / "model"
+        text_proj_dir = model_path / "text_projections"
+        text_proj_dir.mkdir(parents=True)
+        (text_proj_dir / "model.safetensors").write_bytes(b"x")
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
+        _install_fake_transformers_tokenizer(monkeypatch)
+
+        class GuardedItems:
+            def __init__(self):
+                self.materialized = False
+                self.iterated = False
+
+            def __iter__(self):
+                if self.iterated:
+                    raise AssertionError("text projection weight items must be consumed in a single pass")
+                self.iterated = True
+                if self.materialized:
+                    raise AssertionError("text projection weights must not be list-materialized before load_weights")
+                yield ("expected.weight", object())
+                yield ("unmatched.weight", object())
+
+            def __len__(self):
+                self.materialized = True
+                raise AssertionError("text projection weights must not be list-materialized before load_weights")
+
+        guarded_items = GuardedItems()
+        loaded_weights = []
+
+        class FakeWeights:
+            def items(self):
+                return guarded_items
+
+        fake_mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+
+        class FakeTextProjection:
+            def __init__(self, *args):
+                pass
+
+            def parameters(self):
+                return {"expected.weight": object()}
+
+            def load_weights(self, items):
+                assert not isinstance(items, list)
+                loaded_weights.append(list(items))
+
+            def eval(self):
+                return None
+
+        utils_module = types.ModuleType("mlx_video.models.ltx_2.utils")
+        utils_module.load_safetensors = lambda path: FakeWeights()
+        projection_module = types.ModuleType("mlx_video.models.ltx_2.text_projection")
+        projection_module.PixArtAlphaTextProjection = FakeTextProjection
+        for name in ["mlx_video", "mlx_video.models", "mlx_video.models.ltx_2"]:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, utils_module.__name__, utils_module)
+        monkeypatch.setitem(sys.modules, projection_module.__name__, projection_module)
+
+        pipe = LTX23MLXPipeline(
+            model_path=model_path,
+            text_encoder_dir=text_encoder_dir,
+            tokenizer_dir=tokenizer_dir,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(caption_channels=16, cross_attention_dim=16, in_channels=128)
+        pipe._mlx_runtime_ready = True
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._encode_with_gemma3 = lambda prompt, text_encoder_dir, tokenizer_dir, in_features: object()  # type: ignore[method-assign]
+
+        assert pipe.encode_text({"prompt": "prompt", "negative_prompt": ""}) is pipe.context_emb
+        assert len(loaded_weights) == 1
+        assert [key for key, _value in loaded_weights[0]] == ["expected.weight"]
+
+    def test_ltx23_filtered_weight_items_preserves_single_pass_iterators(self):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import _filtered_weight_items
+
+        def weight_items():
+            yield ("unmatched.weight", object())
+            yield ("expected.weight", "first")
+            yield ("expected.bias", "second")
+
+        filtered = _filtered_weight_items(
+            weight_items(),
+            allowed_names={"expected.weight", "expected.bias"},
+            label="test weights",
+        )
+
+        assert filtered.match_count == 1
+        assert list(filtered) == [("expected.weight", "first"), ("expected.bias", "second")]
+
     def test_ltx23_encode_text_runtime_exception_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -5673,6 +5776,169 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeError, match="decoded Wan2.2 frames must have shape"):
             pipe.decode(FakeLatents())
+
+    def test_ltx23_decode_numpy_frame_preflight_reuses_validated_shape(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        vae_decoder_dir = tmp_path / "vae" / "decoder"
+        vae_decoder_dir.mkdir(parents=True)
+        (vae_decoder_dir / "decoder.safetensors").write_bytes(b"x")
+
+        class SinglePassShape:
+            def __init__(self, dims):
+                self._dims = dims
+                self._iterations = 0
+
+            def __iter__(self):
+                self._iterations += 1
+                if self._iterations > 1:
+                    raise AssertionError("decode must not re-read frame shape after validation")
+                yield from self._dims
+
+        class FakeFrame:
+            def __init__(self):
+                self.shape = SinglePassShape((4, 256, 256, 3))
+
+            def astype(self, *_args, **_kwargs):
+                return self
+
+        frame = FakeFrame()
+
+        class FakeVAE:
+            def parameters(self):
+                return object()
+
+            def __call__(self, latents):
+                return object()
+
+        class FakeVideoDecoder:
+            @classmethod
+            def from_pretrained(cls, path):
+                return FakeVAE()
+
+        fake_mx = types.SimpleNamespace(
+            eval=lambda *args: None,
+            squeeze=lambda video, axis: object(),
+            transpose=lambda video, axes: frame,
+            clear_cache=lambda: None,
+        )
+        decoder_module = types.ModuleType("mlx_video.models.ltx_2.video_vae.decoder")
+        decoder_module.VideoDecoder = FakeVideoDecoder
+        upsampler_module = types.ModuleType("mlx_video.models.ltx_2.upsampler")
+        upsampler_module.load_upsampler = lambda path: (object(), None)
+        upsampler_module.upsample_latents = lambda *args: object()
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, decoder_module.__name__, decoder_module)
+        monkeypatch.setitem(sys.modules, upsampler_module.__name__, upsampler_module)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter._numpy",
+            lambda: types.SimpleNamespace(
+                array=lambda value: value,
+                add=lambda *args, **kwargs: None,
+                multiply=lambda *args, **kwargs: None,
+                clip=lambda *args, **kwargs: None,
+                uint8="uint8",
+            ),
+        )
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.model = object()
+        pipe.config = types.SimpleNamespace(in_channels=128)
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        class FakeLatents:
+            shape = (1, 128, 4, 32, 32)
+
+        assert pipe.decode(FakeLatents()) is frame
+
+    def test_wan22_decode_numpy_frame_preflight_reuses_validated_shape(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        (tmp_path / "vae.safetensors").write_bytes(b"x")
+
+        class SinglePassShape:
+            def __init__(self, dims):
+                self._dims = dims
+                self._iterations = 0
+
+            def __iter__(self):
+                self._iterations += 1
+                if self._iterations > 1:
+                    raise AssertionError("decode must not re-read frame shape after validation")
+                yield from self._dims
+
+        class FakeLatents:
+            shape = (48, 1, 16, 16)
+
+            def transpose(self, *args):
+                return self
+
+            def __getitem__(self, key):
+                return self
+
+        class FakeFrame:
+            def __init__(self):
+                self.shape = SinglePassShape((4, 256, 256, 3))
+
+            def astype(self, *_args, **_kwargs):
+                return self
+
+        frame = FakeFrame()
+
+        class FakeVideo:
+            def __getitem__(self, key):
+                return frame
+
+        class FakeVAE:
+            def parameters(self):
+                return object()
+
+            def __call__(self, z):
+                return FakeVideo()
+
+        utils_module = types.ModuleType("mlx_video.models.wan_2.utils")
+        utils_module.load_vae_decoder = lambda path, config: FakeVAE()
+        vae_module = types.ModuleType("mlx_video.models.wan_2.vae22")
+        vae_module.denormalize_latents = lambda z: z
+        monkeypatch.setitem(sys.modules, "mlx_video.models.wan_2.utils", utils_module)
+        monkeypatch.setitem(sys.modules, "mlx_video.models.wan_2.vae22", vae_module)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.wan22_mlx_adapter._numpy",
+            lambda: types.SimpleNamespace(
+                array=lambda value: value,
+                add=lambda *args, **kwargs: None,
+                multiply=lambda *args, **kwargs: None,
+                clip=lambda *args, **kwargs: None,
+                uint8="uint8",
+            ),
+        )
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+        pipe.config = types.SimpleNamespace(vae_z_dim=48)
+        pipe.latent_shape = (48, 1, 16, 16)
+        pipe._mlx_runtime_ready = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        assert pipe.decode(FakeLatents()) is frame
 
     @pytest.mark.parametrize("adapter", ["ltx", "wan"])
     def test_adapter_shape_validation_rejects_unbounded_shape_metadata(self, tmp_path, adapter):

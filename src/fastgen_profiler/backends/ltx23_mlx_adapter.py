@@ -23,6 +23,7 @@ _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
 _MAX_PRELOAD_SCAN_DIRS = 10_000
 _MAX_PRELOAD_SCAN_FILES = 10_000
 _MAX_DENOISE_STEPS = 512
+_MAX_FILTERED_WEIGHT_ITEMS = 100_000
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
@@ -569,13 +570,17 @@ class LTX23MLXPipeline:
             tp_model_params = set()
             for k in self.text_proj.parameters():
                 tp_model_params.add(k)
-            filtered_tp = {k: v for k, v in tp_weights.items() if k in tp_model_params}
-            if not filtered_tp:
+            filtered_tp = _filtered_weight_items(
+                tp_weights.items(),
+                allowed_names=tp_model_params,
+                label="LTX2.3 text projection weights",
+            )
+            if filtered_tp.match_count == 0:
                 raise RuntimeError(
                     "LTX2.3 text projection weights did not match any text projection parameters; "
                     "refusing to continue with an uninitialized projection"
                 )
-            self.text_proj.load_weights(list(filtered_tp.items()))
+            self.text_proj.load_weights(filtered_tp)
 
             self.text_proj.eval()
             self._eval_mlx(mx, self.text_proj.parameters(), phase="text_projection parameters")
@@ -928,7 +933,7 @@ class LTX23MLXPipeline:
             video = mx.squeeze(video, axis=0)
             transposed = mx.transpose(video, (1, 2, 3, 0))
             self._validate_frame_shape(transposed, "decode")
-            self._check_host_allocation(math.prod(transposed.shape) * 13, "numpy_frames")
+            self._check_host_allocation(math.prod(self._expected_frame_shape()) * 13, "numpy_frames")
             np = _numpy()
             frames = np.array(transposed)
 
@@ -1218,6 +1223,70 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
             )
         dims.append(dim)
     return tuple(dims)
+
+
+class _FilteredWeightItems:
+    def __init__(
+        self,
+        iterator: Any,
+        *,
+        allowed_names: set[str],
+        label: str,
+        first_match: tuple[Any, Any] | None,
+        scanned: int,
+    ) -> None:
+        self._iterator = iterator
+        self._allowed_names = allowed_names
+        self._label = label
+        self._first_match = first_match
+        self._scanned = scanned
+        self.match_count = 1 if first_match is not None else 0
+
+    def __iter__(self):
+        if self._first_match is not None:
+            yield self._first_match
+            self._first_match = None
+        for scanned, item in enumerate(self._iterator, start=self._scanned + 1):
+            if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
+                _raise_runtime_abort(
+                    f"{self._label} scan exceeded {_MAX_FILTERED_WEIGHT_ITEMS} items; "
+                    "refusing unbounded weight filtering"
+                )
+            try:
+                key, value = item
+            except (TypeError, ValueError):
+                _raise_runtime_abort(f"{self._label} contained malformed weight item {item!r}")
+            if key in self._allowed_names:
+                self.match_count += 1
+                yield key, value
+
+
+def _filtered_weight_items(items: Any, *, allowed_names: set[str], label: str) -> _FilteredWeightItems:
+    iterator = iter(items)
+    for scanned, item in enumerate(iterator, start=1):
+        if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
+            _raise_runtime_abort(
+                f"{label} scan exceeded {_MAX_FILTERED_WEIGHT_ITEMS} items; refusing unbounded weight filtering"
+            )
+        try:
+            key, value = item
+        except (TypeError, ValueError):
+            _raise_runtime_abort(f"{label} contained malformed weight item {item!r}")
+        if key in allowed_names:
+            return _FilteredWeightItems(
+                iterator,
+                allowed_names=allowed_names,
+                label=label,
+                first_match=(key, value),
+                scanned=scanned,
+            )
+    return _FilteredWeightItems(
+        iter(()),
+        allowed_names=allowed_names,
+        label=label,
+        first_match=None,
+        scanned=0,
+    )
 
 
 def _frame_postprocess_budget_bytes(frames: Any) -> int:

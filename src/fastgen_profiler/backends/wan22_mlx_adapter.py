@@ -643,7 +643,7 @@ class Wan22MLXPipeline:
                 self._eval_mlx(self.mx, video, phase="vae video")
                 self._check_memory("vae_forward after")
                 self._validate_frame_shape(video[0], "decode")
-                self._check_host_allocation(math.prod(video[0].shape) * 13, "numpy_frames")
+                self._check_host_allocation(math.prod(self._expected_frame_shape()) * 13, "numpy_frames")
                 np = _numpy()
                 frames = np.array(video[0])
                 del z
@@ -654,7 +654,7 @@ class Wan22MLXPipeline:
                 self._check_memory("vae_forward after")
                 video_slice = video[0]
                 self._validate_frame_shape(video_slice, "decode")
-                self._check_host_allocation(math.prod(video_slice.shape) * 13, "numpy_frames")
+                self._check_host_allocation(math.prod(self._expected_frame_shape()) * 13, "numpy_frames")
                 np = _numpy()
                 frames = np.array(video_slice).transpose(1, 2, 3, 0)
                 del video_slice
