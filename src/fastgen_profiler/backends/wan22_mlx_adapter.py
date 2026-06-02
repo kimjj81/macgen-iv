@@ -570,15 +570,13 @@ class Wan22MLXPipeline:
         try:
             self._validate_latents_shape(latents, phase)
             self._check_memory(f"{phase} before")
-            timestep_val = self.scheduler.timesteps.tolist()[step_index]
-            latent_shape = getattr(latents, "shape", None)
-            if latent_shape is not None:
-                cfg_factor = 1 if self.cfg_disabled else 2
-                self._check_mlx_tensor_floor(
-                    math.prod(latent_shape) * cfg_factor,
-                    f"{phase} tensors",
-                    multiplier=8,
-                )
+            timestep_val = self.scheduler.timesteps[step_index]
+            cfg_factor = 1 if self.cfg_disabled else 2
+            self._check_mlx_tensor_floor(
+                math.prod(self.latent_shape) * cfg_factor,
+                f"{phase} tensors",
+                multiplier=8,
+            )
             if self.cfg_disabled:
                 t_batch = self.mx.array([timestep_val])
                 preds = self.model(

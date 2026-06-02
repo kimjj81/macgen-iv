@@ -3766,7 +3766,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             array=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("wan denoise failed")),
         )
         pipe.model = object()
-        pipe.scheduler = types.SimpleNamespace(timesteps=types.SimpleNamespace(tolist=lambda: [1]))
+        pipe.scheduler = types.SimpleNamespace(timesteps={0: 1})
         pipe.latent_shape = (48, 1, 16, 16)
         pipe.seq_len = 1
         pipe.cross_kv = object()
@@ -3841,7 +3841,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             array=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mx.array must be preflighted")),
         )
         pipe.model = object()
-        pipe.scheduler = types.SimpleNamespace(timesteps=types.SimpleNamespace(tolist=lambda: [1]))
+        pipe.scheduler = types.SimpleNamespace(timesteps={0: 1})
         pipe.latent_shape = (16, 1, 32, 32)
         pipe.seq_len = 1
         pipe.context_cfg = object()
@@ -4322,6 +4322,65 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pipe.denoise_step(FakeLatents(), step_index=step_index, steps=steps, guidance=1.0, cache="none")
 
         assert cleanup_calls == ["cleanup"]
+
+    def test_wan22_denoise_indexes_scheduler_timestep_without_materializing_all_timesteps(
+        self,
+        tmp_path,
+    ):
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeTimesteps:
+            def __getitem__(self, index):
+                assert index == 0
+                return 0.5
+
+            def tolist(self):
+                raise AssertionError("denoise_step must not materialize all scheduler timesteps")
+
+        class FakeScheduler:
+            timesteps = FakeTimesteps()
+
+            def step(self, noise_pred, timestep_val, latents):
+                return types.SimpleNamespace(squeeze=lambda axis: "next_latents")
+
+        class FakeMX:
+            def eval(self, *args):
+                return None
+
+            def array(self, value):
+                return value
+
+        class FakeLatents:
+            shape = (16, 1, 1, 1)
+
+            def __getitem__(self, key):
+                return self
+
+        class FakeModel:
+            def __call__(self, *args, **kwargs):
+                return [FakeLatents()]
+
+        pipe = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe.mx = FakeMX()
+        pipe.model = FakeModel()
+        pipe.scheduler = FakeScheduler()
+        pipe.latent_shape = (16, 1, 1, 1)
+        pipe.seq_len = 1
+        pipe.cross_kv = object()
+        pipe.rope_cos_sin = object()
+        pipe.context_cond = object()
+        pipe.cfg_disabled = True
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_mlx_tensor_floor = lambda elements, phase, multiplier=4: None  # type: ignore[method-assign]
+
+        assert pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=1.0, cache="none") == "next_latents"
 
     def test_ltx23_denoise_checks_memory_before_work(self, tmp_path):
         pytest.importorskip("mlx_video.models.ltx_2.config")

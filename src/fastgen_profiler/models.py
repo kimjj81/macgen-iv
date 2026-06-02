@@ -339,19 +339,17 @@ def _discover_flat_model_files(
     won't match because the directory name has no model family info.
     Instead, create one candidate per matching file.
     """
-    try:
-        entries = root.iterdir()
-    except OSError:
-        return
-
     model_suffixes = {".ckpt", ".safetensors", ".gguf", ".mlx"}
-    for scanned, entry in enumerate(entries, start=1):
+    for scanned, entry in enumerate(_safe_iterdir(root), start=1):
         if scanned > max_files:
             raise ValueError(
                 f"model discovery scanned more than {max_files} files in {root}; "
                 "narrow --model-dir or import source"
             )
-        if not entry.is_file():
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
             continue
         if entry.suffix.lower() not in model_suffixes:
             continue
@@ -371,18 +369,16 @@ def _discover_flat_model_files(
 
 def _markers(path: Path, *, max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES) -> tuple[str, ...]:
     markers: list[str] = []
-    try:
-        children = path.iterdir()
-    except OSError:
-        return ()
-
-    for scanned, child in enumerate(children, start=1):
+    for scanned, child in enumerate(_safe_iterdir(path), start=1):
         if scanned > max_files:
             raise ValueError(
                 f"model discovery scanned more than {max_files} files in {path}; "
                 "narrow --model-dir or import source"
             )
-        if not child.is_file():
+        try:
+            if not child.is_file():
+                continue
+        except OSError:
             continue
         if child.name in MODEL_MARKER_FILES:
             markers.append(child.name)
@@ -395,6 +391,20 @@ def _markers(path: Path, *, max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES) 
             break
 
     return tuple(sorted(set(markers)))
+
+
+def _safe_iterdir(path: Path) -> Iterable[Path]:
+    try:
+        iterator = path.iterdir()
+        while True:
+            try:
+                yield next(iterator)
+            except StopIteration:
+                return
+            except OSError:
+                return
+    except OSError:
+        return
 
 
 def _is_generation_model_candidate(candidate: ModelCandidate, *, model: str) -> bool:

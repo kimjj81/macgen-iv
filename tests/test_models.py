@@ -86,6 +86,25 @@ def test_model_discovery_rejects_excessive_flat_file_scan(tmp_path, monkeypatch)
         discover_models([root], model="wan2.2", max_files=2)
 
 
+def test_model_marker_scan_ignores_iteration_time_filesystem_interrupt():
+    class FakeChild:
+        name = "config.json"
+        suffix = ".json"
+
+        def is_file(self):
+            return True
+
+    class FakePath:
+        def __str__(self):
+            return "fake-model-dir"
+
+        def iterdir(self):
+            yield FakeChild()
+            raise InterruptedError("scan interrupted")
+
+    assert models_module._markers(FakePath()) == ("config.json",)
+
+
 def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):
     hf_model = tmp_path / "huggingface" / "models--owner--wan2.2" / "snapshots" / "abc123"
     draw_model = tmp_path / "Draw Things" / "Models" / "ltx2.3-video"
