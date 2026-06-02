@@ -8,9 +8,12 @@ from typing import Any
 
 
 MAX_REPORT_FIELD_CHARS = 256
+MAX_REPORT_RECORDS = 10_000
+MAX_REPORT_RUNS = 1_000
 
 
 def render_markdown_report(records: list[dict[str, Any]]) -> str:
+    _validate_report_size(records)
     runs = _group_by_run(records)
     lines = ["# FastGen Profile Report", ""]
 
@@ -83,6 +86,20 @@ def render_markdown_report(records: list[dict[str, Any]]) -> str:
     lines.extend(["", "## Recommended Next Bottleneck To Inspect", ""])
     lines.append(_recommendation(runs))
     return "\n".join(lines) + "\n"
+
+
+def _validate_report_size(records: list[dict[str, Any]]) -> None:
+    if len(records) > MAX_REPORT_RECORDS:
+        raise ValueError(
+            f"report record limit exceeded: {len(records)} records > {MAX_REPORT_RECORDS}"
+        )
+    run_ids: set[str] = set()
+    for record in records:
+        run_ids.add(str(record["run_id"]))
+        if len(run_ids) > MAX_REPORT_RUNS:
+            raise ValueError(
+                f"report run limit exceeded: more than {MAX_REPORT_RUNS} runs"
+            )
 
 
 def _group_by_run(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

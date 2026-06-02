@@ -4,6 +4,8 @@ import builtins
 from pathlib import Path
 import sys
 
+import pytest
+
 from fastgen_profiler.backends import create_backend
 from fastgen_profiler.metrics import (
     MAX_METRIC_COLLECTION_ITEMS,
@@ -283,3 +285,25 @@ def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():
     assert "<truncated>" in report
     assert "1024 bytes" in report
     assert "x" * 300 not in report
+
+
+def test_markdown_report_rejects_too_many_runs_before_rendering_sections():
+    from fastgen_profiler.reports.markdown import MAX_REPORT_RUNS
+
+    records = [
+        {
+            "run_id": f"run-{index}",
+            "preset": "manual",
+            "variant_label": "manual",
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "total",
+            "seconds": 0.0,
+            "peak_memory": None,
+            "error": None,
+        }
+        for index in range(MAX_REPORT_RUNS + 1)
+    ]
+
+    with pytest.raises(ValueError, match="report run limit"):
+        render_markdown_report(records)
