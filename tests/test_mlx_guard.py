@@ -2648,6 +2648,17 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         limits.assert_not_called()
 
+    def test_ltx23_config_reader_does_not_use_unbounded_read_text(self, tmp_path):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import _read_bounded_json_config
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"hidden_size": 16}', encoding="utf-8")
+
+        with patch.object(Path, "read_text", side_effect=AssertionError("config read must be bounded")):
+            config = _read_bounded_json_config(config_path, "preflight transformer config")
+
+        assert config == {"hidden_size": 16}
+
     def test_ltx23_transformer_config_rejects_too_many_json_items_before_mlx_limits(self, tmp_path):
         from fastgen_profiler.backends import ltx23_mlx_adapter
         from fastgen_profiler.backends.ltx23_mlx_adapter import _read_bounded_json_config
@@ -8075,6 +8086,17 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeMemoryAbort, match="above safe config limit"):
             _load_raw_config_for_preflight(config_path)
+
+    def test_wan22_raw_config_reader_does_not_use_unbounded_read_text(self, tmp_path):
+        from fastgen_profiler.backends.wan22_mlx_adapter import _load_raw_config_for_preflight
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"dim": 16}', encoding="utf-8")
+
+        with patch.object(Path, "read_text", side_effect=AssertionError("config read must be bounded")):
+            config = _load_raw_config_for_preflight(config_path)
+
+        assert config.dim == 16
 
     def test_wan22_raw_config_rejects_too_many_json_items_before_mlx_limits(self, tmp_path):
         from fastgen_profiler.backends import wan22_mlx_adapter

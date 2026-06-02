@@ -979,6 +979,12 @@ class LTX23MLXPipeline:
         self._decode_started = True
         self._ensure_mlx_runtime_ready("decode")
 
+        upsampler = None
+        vae_temp = None
+        vae = None
+        video = None
+        transposed = None
+        frames = None
         try:
             import mlx.core as mx
             from mlx_video.models.ltx_2.video_vae.decoder import VideoDecoder
@@ -1042,6 +1048,8 @@ class LTX23MLXPipeline:
             self._check_memory("vae_decode after")
             return frames
         except Exception as exc:
+            upsampler = vae_temp = vae = video = transposed = frames = latents = None
+            gc.collect()
             _cleanup_loaded_runtime_after_error(exc)
             raise
 
@@ -1190,7 +1198,7 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
             f"LTX2.3 {label} at {path} is {size} bytes, above safe config limit "
             f"{_MAX_CONFIG_JSON_BYTES}; refusing unbounded config load"
         )
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = json.loads(_read_bounded_text_file(path, label=label))
     if not isinstance(config, dict):
         from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
@@ -1199,6 +1207,26 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
         )
     _assert_bounded_json_structure(config, label=label)
     return config
+
+
+def _read_bounded_text_file(path: Path, *, label: str) -> str:
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(_MAX_CONFIG_JSON_BYTES + 1)
+    except OSError as exc:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"cannot read {path} before reading LTX2.3 {label}; refusing unbounded config load"
+        ) from exc
+    if len(data) > _MAX_CONFIG_JSON_BYTES:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"LTX2.3 {label} at {path} exceeded safe config limit "
+            f"{_MAX_CONFIG_JSON_BYTES} during read; refusing unbounded config load"
+        )
+    return data.decode("utf-8")
 
 
 def _assert_bounded_json_structure(value: Any, *, label: str) -> None:

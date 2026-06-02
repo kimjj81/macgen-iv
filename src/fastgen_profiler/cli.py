@@ -1925,10 +1925,12 @@ def _prompt_int(label: str, default: int) -> int:
 
 
 def _input_stripped(prompt: str, *, label: str, max_chars: int) -> str:
-    raw = input(prompt)
-    if len(raw) > max_chars:
+    typer.echo(prompt, nl=False)
+    raw = sys.stdin.readline(max_chars + 2)
+    line = raw.rstrip("\n\r")
+    if len(line) > max_chars:
         raise typer.BadParameter(f"{label} must be no longer than {max_chars} chars")
-    return raw.strip()
+    return line.strip()
 
 
 if __name__ == "__main__":

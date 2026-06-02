@@ -235,107 +235,115 @@ def run_single(steps: int):
 
     result = {"steps": steps, "width": WIDTH, "height": HEIGHT, "frames": FRAMES}
 
-    pipe = create_ltx23_pipeline(
-        model_path=MODEL_PATH,
-        seed=SEED,
-        width=WIDTH,
-        height=HEIGHT,
-        frames=FRAMES,
-        steps=steps,
-        fps=FPS,
-        guidance=1.0,
-        save_video=False,
-    )
-
-    # Load model
-    t0 = time.perf_counter()
-    pipe.load_model()
-    t1 = time.perf_counter()
-    result["load_model_s"] = round(t1 - t0, 2)
-    print(f"  load_model: {result['load_model_s']}s")
-
-    import mlx.core as mx
-
-    # Text encode
-    t0 = time.perf_counter()
-    prepared = pipe.prepare_prompt(prompt=PROMPT, negative_prompt=NEGATIVE_PROMPT)
-    context = pipe.encode_text(prepared)
-    _eval_mlx(mx, context, label=f"{label} text_encode")
-    t1 = time.perf_counter()
-    result["text_encode_s"] = round(t1 - t0, 2)
-    print(f"  text_encode: {result['text_encode_s']}s")
-
-    # Init latents
-    latents = pipe.init_latents(seed=SEED, width=WIDTH, height=HEIGHT, frames=FRAMES)
-    _eval_mlx(mx, latents, label=f"{label} latent_init")
-
-    # Denoise
-    denoise_times = []
-    for i in range(steps):
-        check_runtime_memory(label=f"{label} denoise {i+1}/{steps} before")
-        _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} input")
-        t0 = time.perf_counter()
-        latents = pipe.denoise_step(
-            latents, step_index=i, steps=steps, guidance=1.0, cache="none"
-        )
-        _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} output")
-        check_runtime_memory(label=f"{label} denoise {i+1}/{steps} after")
-        t1 = time.perf_counter()
-        step_s = t1 - t0
-        denoise_times.append(step_s)
-        if (i + 1) % 8 == 0 or i == 0:
-            print(f"  denoise {i+1}/{steps} ({step_s:.2f}s)")
-
-    result["denoise_total_s"] = round(sum(denoise_times), 2)
-    result["denoise_avg_s"] = round(sum(denoise_times) / len(denoise_times), 2)
-    result["denoise_min_s"] = round(min(denoise_times), 2)
-    result["denoise_max_s"] = round(max(denoise_times), 2)
-
-    # VAE decode
-    _eval_mlx(mx, latents, label=f"{label} vae_decode input")
-    check_runtime_memory(label=f"{label} vae_decode before")
-    t0 = time.perf_counter()
-    video = pipe.decode(latents)
-    _check_decoded_video_shape(video, label=label)
-    check_runtime_memory(label=f"{label} vae_decode after")
-    t1 = time.perf_counter()
-    result["vae_decode_s"] = round(t1 - t0, 2)
-
-    # Quality metrics
-    check_host_allocation_headroom(
-        _video_frame_budget_bytes(video, multiplier=VIDEO_STATS_ALLOCATION_MULTIPLIER),
-        label=f"{label} quality metrics",
-    )
-    result["video_shape"] = [FRAMES, HEIGHT, WIDTH, 3]
-    result["pixel_min"] = _video_pixel_stat_int(video, "min", label=label)
-    result["pixel_max"] = _video_pixel_stat_int(video, "max", label=label)
-    result["pixel_mean"] = round(_video_pixel_stat_float(video, "mean", label=label), 2)
-    result["pixel_std"] = round(_video_pixel_stat_float(video, "std", label=label), 2)
-
-    # Save frames as PNG
-    check_host_allocation_headroom(
-        _video_frame_budget_bytes(video, multiplier=PNG_FRAME_ALLOCATION_MULTIPLIER),
-        label=f"{label} png frames",
-    )
-    from PIL import Image
+    pipe = None
+    latents = None
+    video = None
+    context = None
+    prepared = None
     img = None
-    for idx in range(FRAMES):
-        img = _save_png_frame(Image, video, idx, step_dir=step_dir, label=label)
+    try:
+        pipe = create_ltx23_pipeline(
+            model_path=MODEL_PATH,
+            seed=SEED,
+            width=WIDTH,
+            height=HEIGHT,
+            frames=FRAMES,
+            steps=steps,
+            fps=FPS,
+            guidance=1.0,
+            save_video=False,
+        )
 
-    total = result["denoise_total_s"] + result["vae_decode_s"]
-    print(f"  DONE: denoise={result['denoise_total_s']}s  vae={result['vae_decode_s']}s  "
-          f"total={round(total,1)}s  pixels=[{result['pixel_min']},{result['pixel_max']}] "
-          f"mean={result['pixel_mean']}")
+        # Load model
+        t0 = time.perf_counter()
+        pipe.load_model()
+        t1 = time.perf_counter()
+        result["load_model_s"] = round(t1 - t0, 2)
+        print(f"  load_model: {result['load_model_s']}s")
 
-    # Aggressive cleanup to prevent resource accumulation
-    del pipe, latents, video, context, prepared
-    if img is not None:
-        del img
-    gc.collect()
-    cleanup = mlx_cleanup()
-    print(f"  [guard] cleanup: freed={cleanup.get('freed_gb', '?')}GB "
-          f"now_free={cleanup.get('free_after_gb', '?')}GB")
-    increment_run_counter()
+        import mlx.core as mx
+
+        # Text encode
+        t0 = time.perf_counter()
+        prepared = pipe.prepare_prompt(prompt=PROMPT, negative_prompt=NEGATIVE_PROMPT)
+        context = pipe.encode_text(prepared)
+        _eval_mlx(mx, context, label=f"{label} text_encode")
+        t1 = time.perf_counter()
+        result["text_encode_s"] = round(t1 - t0, 2)
+        print(f"  text_encode: {result['text_encode_s']}s")
+
+        # Init latents
+        latents = pipe.init_latents(seed=SEED, width=WIDTH, height=HEIGHT, frames=FRAMES)
+        _eval_mlx(mx, latents, label=f"{label} latent_init")
+
+        # Denoise
+        denoise_times = []
+        for i in range(steps):
+            check_runtime_memory(label=f"{label} denoise {i+1}/{steps} before")
+            _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} input")
+            t0 = time.perf_counter()
+            latents = pipe.denoise_step(
+                latents, step_index=i, steps=steps, guidance=1.0, cache="none"
+            )
+            _eval_mlx(mx, latents, label=f"{label} denoise {i+1}/{steps} output")
+            check_runtime_memory(label=f"{label} denoise {i+1}/{steps} after")
+            t1 = time.perf_counter()
+            step_s = t1 - t0
+            denoise_times.append(step_s)
+            if (i + 1) % 8 == 0 or i == 0:
+                print(f"  denoise {i+1}/{steps} ({step_s:.2f}s)")
+
+        result["denoise_total_s"] = round(sum(denoise_times), 2)
+        result["denoise_avg_s"] = round(sum(denoise_times) / len(denoise_times), 2)
+        result["denoise_min_s"] = round(min(denoise_times), 2)
+        result["denoise_max_s"] = round(max(denoise_times), 2)
+
+        # VAE decode
+        _eval_mlx(mx, latents, label=f"{label} vae_decode input")
+        check_runtime_memory(label=f"{label} vae_decode before")
+        t0 = time.perf_counter()
+        video = pipe.decode(latents)
+        _check_decoded_video_shape(video, label=label)
+        check_runtime_memory(label=f"{label} vae_decode after")
+        t1 = time.perf_counter()
+        result["vae_decode_s"] = round(t1 - t0, 2)
+
+        # Quality metrics
+        check_host_allocation_headroom(
+            _video_frame_budget_bytes(video, multiplier=VIDEO_STATS_ALLOCATION_MULTIPLIER),
+            label=f"{label} quality metrics",
+        )
+        result["video_shape"] = [FRAMES, HEIGHT, WIDTH, 3]
+        result["pixel_min"] = _video_pixel_stat_int(video, "min", label=label)
+        result["pixel_max"] = _video_pixel_stat_int(video, "max", label=label)
+        result["pixel_mean"] = round(_video_pixel_stat_float(video, "mean", label=label), 2)
+        result["pixel_std"] = round(_video_pixel_stat_float(video, "std", label=label), 2)
+
+        # Save frames as PNG
+        check_host_allocation_headroom(
+            _video_frame_budget_bytes(video, multiplier=PNG_FRAME_ALLOCATION_MULTIPLIER),
+            label=f"{label} png frames",
+        )
+        from PIL import Image
+        for idx in range(FRAMES):
+            img = _save_png_frame(Image, video, idx, step_dir=step_dir, label=label)
+
+        total = result["denoise_total_s"] + result["vae_decode_s"]
+        print(f"  DONE: denoise={result['denoise_total_s']}s  vae={result['vae_decode_s']}s  "
+              f"total={round(total,1)}s  pixels=[{result['pixel_min']},{result['pixel_max']}] "
+              f"mean={result['pixel_mean']}")
+
+        # Aggressive cleanup to prevent resource accumulation
+        pipe = latents = video = context = prepared = img = None
+        gc.collect()
+        cleanup = mlx_cleanup()
+        print(f"  [guard] cleanup: freed={cleanup.get('freed_gb', '?')}GB "
+              f"now_free={cleanup.get('free_after_gb', '?')}GB")
+        increment_run_counter()
+    except Exception:
+        pipe = latents = video = context = prepared = img = None
+        gc.collect()
+        raise
 
     return result
 

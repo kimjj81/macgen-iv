@@ -22,6 +22,22 @@ def _reset_mlx_run_counter():
     reset_run_counter()
 
 
+class _InteractiveStdin:
+    def __init__(self, *answers: str):
+        self._answers = iter(f"{answer}\n" for answer in answers)
+        self.readline_limits: list[int] = []
+
+    def isatty(self):
+        return True
+
+    def readline(self, limit=-1):
+        self.readline_limits.append(limit)
+        answer = next(self._answers)
+        if limit is None or limit < 0:
+            return answer
+        return answer[:limit]
+
+
 def test_cli_run_parses_required_arguments_and_stub_writes_jsonl(tmp_path):
     jsonl_path = tmp_path / "benchmarks.jsonl"
     output_dir = tmp_path / "outputs"
@@ -1929,12 +1945,8 @@ def test_stress_preset_rejects_ltx23_until_backend_stabilizes(tmp_path):
 def test_missing_preset_prompts_for_selection_when_interactive(tmp_path, monkeypatch):
     jsonl_path = tmp_path / "benchmarks.jsonl"
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: "1")
+    stdin = _InteractiveStdin("1")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main(
         [
@@ -2076,12 +2088,8 @@ def test_interactive_mlx_model_selection(tmp_path, monkeypatch):
     (first / "config.json").write_text("{}", encoding="utf-8")
     (second / "config.json").write_text("{}", encoding="utf-8")
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: "2")
+    stdin = _InteractiveStdin("2")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main(
         [
@@ -2260,13 +2268,8 @@ def test_interactive_main_menu_can_import_model_dirs(tmp_path, monkeypatch):
     draw_model.mkdir(parents=True)
     (draw_model / "model.safetensors").write_text("", encoding="utf-8")
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    answers = iter(["3", "y"])
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    stdin = _InteractiveStdin("3", "y")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main([])
 
@@ -2278,13 +2281,8 @@ def test_interactive_main_menu_can_import_model_dirs(tmp_path, monkeypatch):
 def test_interactive_main_menu_run_profile_creates_jsonl(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    answers = iter(["1", "", "", "", "", "", "", ""])
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    stdin = _InteractiveStdin("1", "", "", "", "", "", "", "")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main([])
 
@@ -2306,13 +2304,8 @@ def test_interactive_main_menu_list_models_outputs_all_candidates_without_prompt
     (ltx_path / "config.json").write_text("{}", encoding="utf-8")
     (tmp_path / ".env").write_text(f"FASTGEN_MODEL_DIRS={model_root}\n", encoding="utf-8")
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    answers = iter(["2"])
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    stdin = _InteractiveStdin("2")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main([])
 
@@ -2325,29 +2318,25 @@ def test_interactive_main_menu_list_models_outputs_all_candidates_without_prompt
 def test_interactive_main_menu_rejects_oversized_selection_before_parsing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: "1" * 10_000)
+    stdin = _InteractiveStdin("1" * 10_000)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: (_ for _ in ()).throw(AssertionError("input() must not be used")),
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         main([])
 
     assert "command selection must be no longer than 64 chars" in str(exc_info.value)
+    assert stdin.readline_limits == [66]
 
 
 def test_run_command_prompts_for_missing_required_values_interactively(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    answers = iter(["", "", "", "", "", "", ""])
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    stdin = _InteractiveStdin("", "", "", "", "", "", "")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main(["run"])
 
@@ -2358,18 +2347,18 @@ def test_run_command_prompts_for_missing_required_values_interactively(tmp_path,
 def test_run_command_rejects_oversized_interactive_int_before_parsing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    answers = iter(["", "", "", "", "1" * 10_000])
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    stdin = _InteractiveStdin("", "", "", "", "1" * 10_000)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _: (_ for _ in ()).throw(AssertionError("input() must not be used")),
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         main(["run"])
 
     assert "Seed must be no longer than 64 chars" in str(exc_info.value)
+    assert stdin.readline_limits[-1] == 66
 
 
 def test_models_command_without_subcommand_lists_interactively(tmp_path, monkeypatch, capsys):
@@ -2380,12 +2369,8 @@ def test_models_command_without_subcommand_lists_interactively(tmp_path, monkeyp
     (model_path / "config.json").write_text("{}", encoding="utf-8")
     (tmp_path / ".env").write_text(f"FASTGEN_MODEL_DIRS={model_root}\n", encoding="utf-8")
 
-    class InteractiveStdin:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(sys, "stdin", InteractiveStdin())
-    monkeypatch.setattr("builtins.input", lambda _: "")
+    stdin = _InteractiveStdin("")
+    monkeypatch.setattr(sys, "stdin", stdin)
 
     exit_code = main(["models"])
 
