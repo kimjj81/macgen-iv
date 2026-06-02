@@ -414,7 +414,26 @@ def _clear_exception_traceback_frames(exc: BaseException | None) -> None:
 
 def _cleanup_after_exception(exc: BaseException | None = None) -> dict[str, object]:
     _clear_exception_traceback_frames(exc)
-    return mlx_cleanup()
+    cleanup = mlx_cleanup()
+    _detach_exception(exc)
+    return cleanup
+
+
+def _detach_exception(exc: BaseException | None) -> None:
+    if exc is None:
+        return
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
 
 
 def _env_gb_to_bytes(name: str) -> int | None:

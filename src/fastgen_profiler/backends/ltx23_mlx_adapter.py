@@ -157,8 +157,10 @@ class LTX23MLXPipeline:
         self._mlx_runtime_ready = False
         self._text_encode_started = False
         self._decode_started = False
+        self._runtime_failed = False
 
     def _ensure_mlx_runtime_ready(self, phase: str) -> None:
+        self._fail_if_runtime_failed(phase)
         if self._mlx_runtime_ready:
             return
         from fastgen_profiler.mlx_guard import (
@@ -177,6 +179,46 @@ class LTX23MLXPipeline:
         )
         configure_mlx_resource_limits(label=f"ltx2.3 {phase}")
         self._mlx_runtime_ready = True
+
+    def _fail_if_runtime_failed(self, phase: str) -> None:
+        if not self._runtime_failed:
+            return
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [ltx2.3 {phase}]: pipeline is unusable after "
+            "a previous MLX/Metal failure; create a fresh process before continuing."
+        )
+
+    def _poison_after_runtime_failure(self) -> None:
+        self.config = None
+        self.model = None
+        self.scheduler = None
+        self.text_proj = None
+        self.latent_shape = None
+        self.context_emb = None
+        self._mlx_runtime_ready = False
+        self._text_encode_started = True
+        self._decode_started = True
+        self._runtime_failed = True
+
+    def _abort_after_runtime_failure(
+        self,
+        phase: str,
+        exc: BaseException,
+        *,
+        failure: str = "MLX/Metal runtime failed",
+    ) -> None:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        self._poison_after_runtime_failure()
+        gc.collect()
+        _cleanup_loaded_runtime_after_error(exc)
+        detail = _safe_exception_detail(exc)
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [ltx2.3 {phase}]: {failure}: {detail}; "
+            "pipeline was discarded to avoid retaining unsafe runtime state."
+        ) from None
 
     def _check_memory(self, phase: str) -> None:
         try:
@@ -489,11 +531,11 @@ class LTX23MLXPipeline:
 
             target = None
             gc.collect()
-            _cleanup_loaded_runtime_after_error(exc)
-            raise RuntimeMemoryAbort(
-                "Runtime memory abort [ltx2.3 synchronize]: MLX synchronization failed; "
-                "aborting because Metal runtime state may be unsafe."
-            ) from exc
+            self._abort_after_runtime_failure(
+                "synchronize",
+                exc,
+                failure="MLX synchronization failed",
+            )
 
     def _eval_mlx(self, mx: Any, *targets: Any, phase: str) -> None:
         try:
@@ -503,13 +545,10 @@ class LTX23MLXPipeline:
 
             targets = ()
             gc.collect()
-            _cleanup_loaded_runtime_after_error(exc)
-            raise RuntimeMemoryAbort(
-                f"Runtime memory abort [ltx2.3 {phase}]: MLX eval failed; "
-                "aborting because Metal runtime state may be unsafe."
-            ) from exc
+            self._abort_after_runtime_failure(phase, exc, failure="MLX eval failed")
 
     def load_model(self) -> dict[str, object]:
+        self._fail_if_runtime_failed("load_model")
         if self.model is not None:
             raise RuntimeError(
                 "LTX2.3 MLX model is already loaded in this pipeline; create a fresh "
@@ -599,10 +638,10 @@ class LTX23MLXPipeline:
             return {"model_type": self.config.model_type if self.config else "ltx2.3",
                     "width": self.width, "height": self.height}
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("load_model", exc)
 
     def prepare_prompt(self, *, prompt: str, negative_prompt: str | None) -> dict[str, str]:
+        self._fail_if_runtime_failed("prepare_prompt")
         if self.config is None:
             raise RuntimeError("prepare_prompt called before load_model")
         resolved_negative = negative_prompt if negative_prompt else ""
@@ -615,6 +654,7 @@ class LTX23MLXPipeline:
         return {"prompt": prompt, "negative_prompt": resolved_negative}
 
     def encode_text(self, prepared_prompt: dict[str, str]) -> Any:
+        self._fail_if_runtime_failed("encode_text")
         if self.model is None or self.config is None:
             raise RuntimeError("encode_text called before load_model")
         if self._text_encode_started:
@@ -701,8 +741,7 @@ class LTX23MLXPipeline:
             mx.clear_cache()
             return self.context_emb
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("encode_text", exc)
 
     def _encode_with_gemma3(
         self, prompt: str, text_encoder_dir: Path, tokenizer_dir: Path, in_features: int
@@ -834,10 +873,10 @@ class LTX23MLXPipeline:
 
             return context_emb
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("text_encoder", exc)
 
     def init_latents(self, *, seed: int, width: int, height: int, frames: int) -> Any:
+        self._fail_if_runtime_failed("latent_init")
         if self.model is None or self.config is None:
             raise RuntimeError("init_latents called before load_model")
         self._validate_latent_init_shape(width=width, height=height, frames=frames)
@@ -862,11 +901,11 @@ class LTX23MLXPipeline:
             self._check_memory("latent_init after")
             return latents
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("latent_init", exc)
 
     def denoise_step(self, latents: Any, *, step_index: int, steps: int, guidance: float, cache: str) -> Any:
         """Single denoise step matching official denoise_distilled logic."""
+        self._fail_if_runtime_failed("denoise")
         if self.model is None or self.config is None:
             raise RuntimeError("denoise_step called before load_model")
         self._validate_denoise_step_args(step_index=step_index, steps=steps)
@@ -967,10 +1006,10 @@ class LTX23MLXPipeline:
             self._check_memory(f"{phase} after")
             return next_latents
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure(phase, exc)
 
     def decode(self, latents: Any) -> Any:
+        self._fail_if_runtime_failed("decode")
         if self.model is None or self.config is None:
             raise RuntimeError("decode called before load_model")
         if self._decode_started:
@@ -1078,10 +1117,10 @@ class LTX23MLXPipeline:
         except Exception as exc:
             upsampler = vae_temp = vae = video = transposed = frames = latents = None
             gc.collect()
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("decode", exc)
 
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
+        self._fail_if_runtime_failed("video_encode")
         frame_shape = self._validate_frame_shape(frames, "video_encode")
         if self.dry_run or not self.save_video:
             return frames
@@ -1115,10 +1154,10 @@ class LTX23MLXPipeline:
                     pass
             frames = None
             gc.collect()
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("video_encode", exc)
 
     def write_output(self, video: Any | Path, output_dir: Path, *, run_id: str) -> Path:
+        self._fail_if_runtime_failed("write_output")
         self._check_memory("file_write before")
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1145,8 +1184,7 @@ class LTX23MLXPipeline:
             self._check_memory("file_write after")
             return output_path
         except Exception as exc:
-            _cleanup_loaded_runtime_after_error(exc)
-            raise
+            self._abort_after_runtime_failure("write_output", exc)
 
     def _check_tensor_shape_allocation(self, tensor: Any, phase: str, *, multiplier: int = 4) -> None:
         dimensions = _bounded_shape_tuple(
@@ -1634,6 +1672,8 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
         mlx_cleanup()
     except Exception:
         pass
+    if exc is not None:
+        _detach_exception(exc)
 
 
 def _clear_traceback_frames(exc: BaseException) -> None:
@@ -1656,6 +1696,28 @@ def _clear_traceback_frames(exc: BaseException) -> None:
             stack.append(current.__cause__)
         if current.__context__ is not None:
             stack.append(current.__context__)
+
+
+def _detach_exception(exc: BaseException) -> None:
+    try:
+        exc.__traceback__ = None
+    except Exception:
+        pass
+    try:
+        exc.__cause__ = None
+    except Exception:
+        pass
+    try:
+        exc.__context__ = None
+    except Exception:
+        pass
+
+
+def _safe_exception_detail(exc: BaseException) -> str:
+    exc_type = type(exc)
+    if exc.args and isinstance(exc.args[0], str):
+        return exc.args[0][:1024]
+    return f"<{exc_type.__module__}.{exc_type.__qualname__}>"
 
 
 def _iter_config_numbers(value: Any, prefix: str = ""):

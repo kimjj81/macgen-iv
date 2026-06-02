@@ -3112,6 +3112,12 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pipe.load_model()
 
         assert cleanup_calls == ["cleanup"]
+        assert pipe.model is None
+        assert pipe.config is None
+        assert pipe.context_emb is None
+        assert pipe._runtime_failed is True
+        with pytest.raises(RuntimeMemoryAbort, match="pipeline is unusable"):
+            pipe.load_model()
 
     def test_ltx23_load_model_import_failure_after_runtime_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
@@ -5567,7 +5573,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=guidance, cache="none")
 
         setattr(pipe, context_attr, FakeContext())
-        with pytest.raises(AssertionError, match="memory check must not run"):
+        with pytest.raises(RuntimeError, match="memory check must not run"):
             pipe.denoise_step(FakeLatents(), step_index=0, steps=1, guidance=guidance, cache="none")
 
     @pytest.mark.parametrize(
@@ -8354,6 +8360,17 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             pipe.load_model()
 
         assert cleanup_calls == ["cleanup"]
+        assert pipe.mx is None
+        assert pipe.model is None
+        assert pipe.t5_encoder is None
+        assert pipe.tokenizer is None
+        assert pipe.context_cond is None
+        assert pipe.context_cfg is None
+        assert pipe.cross_kv is None
+        assert pipe.rope_cos_sin is None
+        assert pipe._runtime_failed is True
+        with pytest.raises(RuntimeMemoryAbort, match="pipeline is unusable"):
+            pipe.load_model()
 
     def test_wan22_load_config_failure_after_runtime_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
