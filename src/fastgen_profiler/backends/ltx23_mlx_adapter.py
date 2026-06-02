@@ -464,18 +464,17 @@ class LTX23MLXPipeline:
                 self._check_memory(f"load_safetensors before {shard}")
                 weights = load_safetensors(shard_path)
                 self._check_memory(f"load_safetensors after {shard}")
-                filtered_items = [
-                    (key, value)
-                    for key, value in weights.items()
-                    if key in model_param_names
-                    and not key.endswith(".input_scale")
-                    and not key.endswith(".weight_scale")
-                ]
-                if filtered_items:
+                filtered_items = _filtered_weight_items(
+                    weights.items(),
+                    allowed_names=model_param_names,
+                    excluded_suffixes=(".input_scale", ".weight_scale"),
+                    label=f"LTX2.3 transformer weights {shard}",
+                )
+                if filtered_items.match_count > 0:
                     self._check_memory(f"model_load before {shard}")
                     self.model.load_weights(filtered_items, strict=False)
                     self._eval_mlx(mx, self.model.parameters(), phase=f"model_load {shard}")
-                    loaded_keys.update(key for key, _ in filtered_items)
+                    loaded_keys.update(filtered_items.matched_keys)
                     self._check_memory(f"model_load after {shard}")
                 del weights, filtered_items
                 gc.collect()
@@ -678,21 +677,16 @@ class LTX23MLXPipeline:
                 self._check_memory(f"text_encoder load_safetensors before {shard}")
                 w = load_safetensors(shard_path)
                 self._check_memory(f"text_encoder load_safetensors after {shard}")
-                mapped_items = []
-                for k, v in w.items():
-                    if k.startswith("language_model.model."):
-                        new_key = k[len("language_model.model."):]
-                    elif k.startswith("model."):
-                        new_key = k[len("model."):]
-                    else:
-                        continue
-                    if new_key in text_model_params:
-                        mapped_items.append((new_key, v))
-                if mapped_items:
+                mapped_items = _mapped_ltx_text_encoder_weight_items(
+                    w.items(),
+                    allowed_names=text_model_params,
+                    label=f"LTX2.3 text encoder weights {shard}",
+                )
+                if mapped_items.match_count > 0:
                     self._check_memory(f"text_encoder before {shard}")
                     text_model.load_weights(mapped_items, strict=False)
                     self._eval_mlx(mx, text_model.parameters(), phase=f"text_encoder {shard}")
-                    loaded_keys.update(key for key, _ in mapped_items)
+                    loaded_keys.update(mapped_items.matched_keys)
                     self._check_memory(f"text_encoder after {shard}")
                 del w, mapped_items
                 gc.collect()
@@ -1231,21 +1225,26 @@ class _FilteredWeightItems:
         iterator: Any,
         *,
         allowed_names: set[str],
+        excluded_suffixes: tuple[str, ...],
         label: str,
         first_match: tuple[Any, Any] | None,
         scanned: int,
     ) -> None:
         self._iterator = iterator
         self._allowed_names = allowed_names
+        self._excluded_suffixes = excluded_suffixes
         self._label = label
         self._first_match = first_match
         self._scanned = scanned
         self.match_count = 1 if first_match is not None else 0
+        self.matched_keys: set[str] = set()
 
     def __iter__(self):
         if self._first_match is not None:
-            yield self._first_match
+            key, value = self._first_match
+            self.matched_keys.add(key)
             self._first_match = None
+            yield key, value
         for scanned, item in enumerate(self._iterator, start=self._scanned + 1):
             if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
                 _raise_runtime_abort(
@@ -1256,12 +1255,19 @@ class _FilteredWeightItems:
                 key, value = item
             except (TypeError, ValueError):
                 _raise_runtime_abort(f"{self._label} contained malformed weight item {item!r}")
-            if key in self._allowed_names:
+            if key in self._allowed_names and not key.endswith(self._excluded_suffixes):
                 self.match_count += 1
+                self.matched_keys.add(key)
                 yield key, value
 
 
-def _filtered_weight_items(items: Any, *, allowed_names: set[str], label: str) -> _FilteredWeightItems:
+def _filtered_weight_items(
+    items: Any,
+    *,
+    allowed_names: set[str],
+    label: str,
+    excluded_suffixes: tuple[str, ...] = (),
+) -> _FilteredWeightItems:
     iterator = iter(items)
     for scanned, item in enumerate(iterator, start=1):
         if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
@@ -1272,10 +1278,11 @@ def _filtered_weight_items(items: Any, *, allowed_names: set[str], label: str) -
             key, value = item
         except (TypeError, ValueError):
             _raise_runtime_abort(f"{label} contained malformed weight item {item!r}")
-        if key in allowed_names:
+        if key in allowed_names and not key.endswith(excluded_suffixes):
             return _FilteredWeightItems(
                 iterator,
                 allowed_names=allowed_names,
+                excluded_suffixes=excluded_suffixes,
                 label=label,
                 first_match=(key, value),
                 scanned=scanned,
@@ -1283,10 +1290,96 @@ def _filtered_weight_items(items: Any, *, allowed_names: set[str], label: str) -
     return _FilteredWeightItems(
         iter(()),
         allowed_names=allowed_names,
+        excluded_suffixes=excluded_suffixes,
         label=label,
         first_match=None,
         scanned=0,
     )
+
+
+class _MappedLTXTextEncoderWeightItems:
+    def __init__(
+        self,
+        iterator: Any,
+        *,
+        allowed_names: set[str],
+        label: str,
+        first_match: tuple[str, Any] | None,
+        scanned: int,
+    ) -> None:
+        self._iterator = iterator
+        self._allowed_names = allowed_names
+        self._label = label
+        self._first_match = first_match
+        self._scanned = scanned
+        self.match_count = 1 if first_match is not None else 0
+        self.matched_keys: set[str] = set()
+
+    def __iter__(self):
+        if self._first_match is not None:
+            key, value = self._first_match
+            self.matched_keys.add(key)
+            self._first_match = None
+            yield key, value
+        for scanned, item in enumerate(self._iterator, start=self._scanned + 1):
+            if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
+                _raise_runtime_abort(
+                    f"{self._label} scan exceeded {_MAX_FILTERED_WEIGHT_ITEMS} items; "
+                    "refusing unbounded weight filtering"
+                )
+            try:
+                raw_key, value = item
+            except (TypeError, ValueError):
+                _raise_runtime_abort(f"{self._label} contained malformed weight item {item!r}")
+            key = _map_ltx_text_encoder_weight_key(raw_key)
+            if key is not None and key in self._allowed_names:
+                self.match_count += 1
+                self.matched_keys.add(key)
+                yield key, value
+
+
+def _mapped_ltx_text_encoder_weight_items(
+    items: Any,
+    *,
+    allowed_names: set[str],
+    label: str,
+) -> _MappedLTXTextEncoderWeightItems:
+    iterator = iter(items)
+    for scanned, item in enumerate(iterator, start=1):
+        if scanned > _MAX_FILTERED_WEIGHT_ITEMS:
+            _raise_runtime_abort(
+                f"{label} scan exceeded {_MAX_FILTERED_WEIGHT_ITEMS} items; refusing unbounded weight filtering"
+            )
+        try:
+            raw_key, value = item
+        except (TypeError, ValueError):
+            _raise_runtime_abort(f"{label} contained malformed weight item {item!r}")
+        key = _map_ltx_text_encoder_weight_key(raw_key)
+        if key is not None and key in allowed_names:
+            return _MappedLTXTextEncoderWeightItems(
+                iterator,
+                allowed_names=allowed_names,
+                label=label,
+                first_match=(key, value),
+                scanned=scanned,
+            )
+    return _MappedLTXTextEncoderWeightItems(
+        iter(()),
+        allowed_names=allowed_names,
+        label=label,
+        first_match=None,
+        scanned=0,
+    )
+
+
+def _map_ltx_text_encoder_weight_key(key: Any) -> str | None:
+    if not isinstance(key, str):
+        _raise_runtime_abort(f"LTX2.3 text encoder weight key {key!r} is not a string")
+    if key.startswith("language_model.model."):
+        return key[len("language_model.model."):]
+    if key.startswith("model."):
+        return key[len("model."):]
+    return None
 
 
 def _frame_postprocess_budget_bytes(frames: Any) -> int:

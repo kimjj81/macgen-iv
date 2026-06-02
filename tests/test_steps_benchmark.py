@@ -696,6 +696,98 @@ def test_steps_benchmark_run_single_does_not_trust_underreported_video_nbytes(tm
     ]
 
 
+def test_steps_benchmark_run_single_reuses_validated_video_shape(tmp_path, monkeypatch):
+    import importlib.util
+    import fastgen_profiler.backends.ltx23_mlx_adapter as ltx_adapter
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_video_shape_reuse_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    monkeypatch.setenv("FASTGEN_STEPS_WIDTH", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_HEIGHT", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_FRAMES", "2")
+    spec.loader.exec_module(module)
+
+    class SinglePassShape:
+        def __init__(self, dims):
+            self._dims = dims
+            self._iterations = 0
+
+        def __iter__(self):
+            self._iterations += 1
+            if self._iterations > 1:
+                raise AssertionError("run_single must not re-read video shape after validation")
+            yield from self._dims
+
+    class FakeVideo:
+        nbytes = 0
+
+        def __init__(self):
+            self.shape = SinglePassShape((2, 4, 4, 3))
+
+        def min(self):
+            return 0
+
+        def max(self):
+            return 255
+
+        def mean(self):
+            return 127.0
+
+        def std(self):
+            return 1.0
+
+        def __getitem__(self, index):
+            return object()
+
+    class FakePipeline:
+        def load_model(self):
+            return {}
+
+        def prepare_prompt(self, *, prompt, negative_prompt):
+            return {"prompt": prompt, "negative_prompt": negative_prompt}
+
+        def encode_text(self, prepared):
+            return object()
+
+        def init_latents(self, *, seed, width, height, frames):
+            return object()
+
+        def denoise_step(self, latents, *, step_index, steps, guidance, cache):
+            return latents
+
+        def decode(self, latents):
+            return FakeVideo()
+
+    fake_mx = types.SimpleNamespace(eval=lambda *args: None, array=lambda value: value)
+    saved: list[str] = []
+    fake_image_module = types.SimpleNamespace(
+        fromarray=lambda frame: types.SimpleNamespace(save=lambda path: saved.append(path))
+    )
+
+    monkeypatch.setattr(module, "check_memory_guard", lambda label: {"free_gb": 100})
+    monkeypatch.setattr(module, "check_run_allocation_budget", lambda **kwargs: {"shape_floor_gb": 1})
+    monkeypatch.setattr(module, "check_runtime_memory", lambda label: None)
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: {"freed_gb": 0, "free_after_gb": 100})
+    monkeypatch.setattr(module, "increment_run_counter", lambda: 1)
+    monkeypatch.setattr(module, "check_host_allocation_headroom", lambda required, *, label: None)
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(ltx_adapter, "create_ltx23_pipeline", lambda **kwargs: FakePipeline())
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=fake_image_module))
+    monkeypatch.setitem(sys.modules, "PIL.Image", fake_image_module)
+
+    result = module.run_single(1)
+
+    assert result["video_shape"] == [2, 4, 4, 3]
+    assert len(saved) == 2
+
+
 def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeypatch):
     import importlib.util
     import fastgen_profiler.backends.ltx23_mlx_adapter as ltx_adapter

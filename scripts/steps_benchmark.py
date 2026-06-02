@@ -284,7 +284,7 @@ def run_single(steps: int):
         _video_frame_budget_bytes(video, multiplier=VIDEO_STATS_ALLOCATION_MULTIPLIER),
         label=f"{label} quality metrics",
     )
-    result["video_shape"] = list(video.shape)
+    result["video_shape"] = [FRAMES, HEIGHT, WIDTH, 3]
     result["pixel_min"] = int(video.min())
     result["pixel_max"] = int(video.max())
     result["pixel_mean"] = round(float(video.mean()), 2)
@@ -297,7 +297,7 @@ def run_single(steps: int):
     )
     from PIL import Image
     img = None
-    for idx in range(video.shape[0]):
+    for idx in range(FRAMES):
         img = Image.fromarray(video[idx])
         img.save(str(step_dir / f"frame_{idx:03d}.png"))
 

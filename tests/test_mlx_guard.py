@@ -2652,6 +2652,86 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeError, match="transformer weights did not match"):
             pipe.load_model()
 
+    def test_ltx23_load_model_streams_transformer_weight_filter(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        transformer_dir = tmp_path / "transformer"
+        transformer_dir.mkdir()
+        (transformer_dir / "config.json").write_text(json.dumps({"in_channels": 128}), encoding="utf-8")
+        (transformer_dir / "model.safetensors").write_bytes(b"x")
+        loaded_weights = []
+
+        class GuardedItems:
+            def __iter__(self):
+                yield ("expected.weight", object())
+                yield ("expected.bias", object())
+                yield ("expected.input_scale", object())
+                yield ("unmatched.weight", object())
+
+            def __len__(self):
+                raise AssertionError("transformer weights must not be list-materialized before load_weights")
+
+        class FakeWeights:
+            def items(self):
+                return GuardedItems()
+
+        class FakeConfig:
+            model_type = "ltx2.3"
+
+            def __init__(self, **kwargs):
+                self.in_channels = kwargs.get("in_channels", 128)
+
+        class FakeModel:
+            def __init__(self, config):
+                self.config = config
+
+            def parameters(self):
+                return {"expected.weight": object(), "expected.bias": object()}
+
+            def load_weights(self, items, strict=False):
+                assert strict is False
+                assert not isinstance(items, list)
+                loaded_weights.append(list(items))
+
+            def eval(self):
+                return None
+
+        fake_mx = types.SimpleNamespace(eval=lambda *args: None, clear_cache=lambda: None)
+        config_module = types.ModuleType("mlx_video.models.ltx_2.config")
+        config_module.LTXModelConfig = FakeConfig
+        model_module = types.ModuleType("mlx_video.models.ltx_2.ltx_2")
+        model_module.LTXModel = FakeModel
+        utils_module = types.ModuleType("mlx_video.models.ltx_2.utils")
+        utils_module.load_safetensors = lambda path: FakeWeights()
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+        monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
+        monkeypatch.setitem(sys.modules, utils_module.__name__, utils_module)
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: object(),
+        )
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._mlx_runtime_ready = True
+        pipe._check_directory_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        assert pipe.load_model()["model_type"] == "ltx2.3"
+        assert [[key for key, _value in loaded] for loaded in loaded_weights] == [
+            ["expected.weight", "expected.bias"]
+        ]
+
     def test_ltx23_load_model_preflights_model_config_before_mlx_limits(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -3715,6 +3795,95 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeError, match="text encoder weights did not match"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, in_features=16)
+
+    def test_ltx23_text_encoder_streams_mapped_weight_filter(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
+        _install_fake_transformers_tokenizer(monkeypatch)
+        loaded_weights = []
+
+        class GuardedItems:
+            def __iter__(self):
+                yield ("language_model.model.expected.weight", object())
+                yield ("model.expected.bias", object())
+                yield ("language_model.model.unmatched.weight", object())
+                yield ("ignored.weight", object())
+
+            def __len__(self):
+                raise AssertionError("text encoder weights must not be list-materialized before load_weights")
+
+        class FakeWeights:
+            def items(self):
+                return GuardedItems()
+
+        class FakeTensor:
+            def reshape(self, *args):
+                return self
+
+        class FakeHidden:
+            def mean(self, axis):
+                return "pooled"
+
+        fake_mx = types.SimpleNamespace(
+            array=lambda value: FakeTensor(),
+            clear_cache=lambda: None,
+            eval=lambda *args: None,
+        )
+
+        class FakeModelArgs:
+            def __init__(self, **kwargs):
+                pass
+
+        class FakeGemma3Model:
+            def __init__(self, args):
+                pass
+
+            def parameters(self):
+                return {"expected.weight": object(), "expected.bias": object()}
+
+            def load_weights(self, items, strict=False):
+                assert strict is False
+                assert not isinstance(items, list)
+                loaded_weights.append(list(items))
+
+            def eval(self):
+                return None
+
+            def __call__(self, input_ids):
+                return FakeHidden()
+
+        utils_module = types.ModuleType("mlx_video.models.ltx_2.utils")
+        utils_module.load_safetensors = lambda path: FakeWeights()
+        gemma_module = types.ModuleType("mlx_lm.models.gemma3_text")
+        gemma_module.ModelArgs = FakeModelArgs
+        gemma_module.Gemma3Model = FakeGemma3Model
+        monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+        monkeypatch.setitem(sys.modules, utils_module.__name__, utils_module)
+        monkeypatch.setitem(sys.modules, gemma_module.__name__, gemma_module)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            text_encoder_dir=text_encoder_dir,
+            tokenizer_dir=tokenizer_dir,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._mlx_runtime_ready = True
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+        pipe.text_proj = lambda pooled: "context"  # type: ignore[method-assign]
+
+        assert pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, in_features=16) == "context"
+        assert [[key for key, _value in loaded] for loaded in loaded_weights] == [
+            ["expected.weight", "expected.bias"]
+        ]
 
     def test_ltx23_text_encoder_runtime_exception_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
