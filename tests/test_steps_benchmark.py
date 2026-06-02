@@ -113,6 +113,11 @@ def test_steps_benchmark_rejects_invalid_positive_integer_env(tmp_path, monkeypa
             "FASTGEN_STEPS_CHILD_RESULT_MAX_BYTES must be no greater than 1048576",
         ),
         (
+            "FASTGEN_STEPS_RESULT_RECORD_MAX_BYTES",
+            str(1024 * 1024 + 1),
+            "FASTGEN_STEPS_RESULT_RECORD_MAX_BYTES must be no greater than 1048576",
+        ),
+        (
             "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES",
             str(1024 * 1024 + 1),
             "FASTGEN_STEPS_CHILD_LOG_TAIL_BYTES must be no greater than 1048576",
@@ -546,6 +551,35 @@ def test_steps_benchmark_run_single_does_not_configure_mlx_before_model_prefligh
         module.run_single(1)
 
     assert calls == ["system", "budget", "prompt", "model_preflight"]
+
+
+def test_steps_benchmark_run_single_fails_closed_when_restart_required(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_restart_guard_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(module, "run_counter", lambda: 1)
+    monkeypatch.setattr(module, "should_restart_process", lambda: True)
+    monkeypatch.setattr(
+        module,
+        "check_memory_guard",
+        lambda label: (_ for _ in ()).throw(AssertionError("memory guard must not run after restart is required")),
+    )
+    monkeypatch.setattr(
+        module.importlib.util,
+        "find_spec",
+        lambda name: (_ for _ in ()).throw(AssertionError("dependency probing must not run after restart is required")),
+    )
+
+    with pytest.raises(module.MemoryGuardError, match="process restart required after 1 consecutive MLX runs"):
+        module.run_single(1)
 
 
 def test_steps_benchmark_run_single_checks_dependency_before_mlx_import(tmp_path, monkeypatch):
@@ -1283,6 +1317,49 @@ def test_steps_benchmark_rejects_unbounded_parent_result_stream(tmp_path, monkey
     assert (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines() == [
         json.dumps({"steps": 1, "skipped": True})
     ]
+
+
+def test_steps_benchmark_rejects_oversized_parent_result_record(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_parent_record_byte_limit_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+
+    result_path = tmp_path / "results.jsonl"
+    with pytest.raises(module.MemoryGuardError, match="steps result record byte limit exceeded"):
+        module._write_steps_jsonl(
+            result_path,
+            [{"steps": 1, "error": "x" * 100}],
+            max_record_bytes=10,
+        )
+
+    assert not result_path.exists() or result_path.read_text(encoding="utf-8") == ""
+
+
+def test_steps_benchmark_child_result_write_rejects_oversized_record(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_child_record_byte_limit_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_RESULT_RECORD_MAX_BYTES", "10")
+    spec.loader.exec_module(module)
+    module.OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
+    result_path = module.OUTPUT_BASE / "steps_1.child.json"
+    with pytest.raises(module.MemoryGuardError, match="steps result record byte limit exceeded"):
+        module._write_child_result_file(result_path, {"steps": 1, "error": "x" * 100})
+
+    assert not result_path.exists()
+    assert not result_path.with_suffix(result_path.suffix + ".tmp").exists()
 
 
 def test_steps_benchmark_heavy_mode_recovers_between_child_processes(tmp_path, monkeypatch):

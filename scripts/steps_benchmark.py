@@ -161,6 +161,11 @@ CHILD_RESULT_MAX_BYTES = _env_capped_positive_int(
     CHILD_IO_MAX_BYTES,
     CHILD_IO_MAX_BYTES,
 )
+STEPS_RESULT_RECORD_MAX_BYTES = _env_capped_positive_int(
+    "FASTGEN_STEPS_RESULT_RECORD_MAX_BYTES",
+    CHILD_IO_MAX_BYTES,
+    CHILD_IO_MAX_BYTES,
+)
 STEPS_RESULT_TEXT_FIELD_MAX_CHARS = 2_048
 STEPS_RESULT_COLLECTION_MAX_ITEMS = 256
 
@@ -181,6 +186,11 @@ def run_single(steps: int):
                 "after reviewing memory limits and model paths"
             ),
         }
+    if should_restart_process():
+        raise MemoryGuardError(
+            f"process restart required after {run_counter()} consecutive MLX runs "
+            "to prevent Metal resource accumulation"
+        )
 
     # Pre-run memory guard
     guard = check_memory_guard(label=label)
@@ -403,9 +413,7 @@ def run_child() -> int:
         result = {"steps": steps, "error": error}
         result["cleanup"] = mlx_cleanup()
 
-    temp_result_path = result_path.with_suffix(result_path.suffix + ".tmp")
-    temp_result_path.write_text(json.dumps(_bound_steps_result(result)) + "\n", encoding="utf-8")
-    temp_result_path.replace(result_path)
+    _write_child_result_file(result_path, result)
     return 0
 
 
@@ -597,21 +605,49 @@ def _bound_steps_sequence(value: Iterable[Any]) -> list[Any]:
     return bounded
 
 
+def _steps_result_json_line(
+    record: dict[str, Any],
+    *,
+    max_record_bytes: int = STEPS_RESULT_RECORD_MAX_BYTES,
+) -> str:
+    if not isinstance(max_record_bytes, int) or isinstance(max_record_bytes, bool) or max_record_bytes <= 0:
+        raise MemoryGuardError("steps result record byte limit must be a positive integer")
+    line = json.dumps(_bound_steps_result(record)) + "\n"
+    line_bytes = len(line.encode("utf-8"))
+    if line_bytes > max_record_bytes:
+        raise MemoryGuardError(
+            f"steps result record byte limit exceeded: {line_bytes} bytes > {max_record_bytes} bytes"
+        )
+    return line
+
+
+def _write_child_result_file(path: Path, record: dict[str, Any]) -> None:
+    line = _steps_result_json_line(record)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temp_path.write_text(line, encoding="utf-8")
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def _write_steps_jsonl(
     path: Path,
     records: Iterable[dict[str, Any]],
     *,
     max_records: int = MAX_STEP_VALUES,
+    max_record_bytes: int = STEPS_RESULT_RECORD_MAX_BYTES,
 ) -> None:
     if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records <= 0:
-        raise MemoryGuardError(f"steps result record limit must be a positive integer, got {max_records!r}")
+        raise MemoryGuardError("steps result record limit must be a positive integer")
     with open(path, "w", encoding="utf-8") as f:
         for index, record in enumerate(records):
             if index >= max_records:
                 raise MemoryGuardError(
                     f"steps result record limit exceeded: more than {max_records} records"
                 )
-            f.write(json.dumps(_bound_steps_result(record)) + "\n")
+            f.write(_steps_result_json_line(record, max_record_bytes=max_record_bytes))
 
 
 def parent_inter_child_recovery(label: str) -> dict[str, object]:

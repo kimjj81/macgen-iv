@@ -34,6 +34,7 @@ DEFAULT_JSONL_READ_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_JSONL_READ_MAX_RECORDS = 100_000
 MAX_METRIC_TEXT_FIELD_CHARS = 2_048
 MAX_METRIC_COLLECTION_ITEMS = 256
+MAX_METRIC_RECORD_JSON_BYTES = 256 * 1024
 MAX_MACHINE_METADATA_OUTPUT_BYTES = 16 * 1024
 MAX_RUN_DIMENSION = 4096
 MAX_RUN_FRAMES = 257
@@ -215,9 +216,12 @@ def append_jsonl(
     records: Iterable[MeasurementRecord],
     *,
     max_records: int = DEFAULT_JSONL_READ_MAX_RECORDS,
+    max_record_bytes: int = MAX_METRIC_RECORD_JSON_BYTES,
 ) -> None:
     if max_records <= 0:
         raise ValueError("JSONL write record limit must be positive")
+    if max_record_bytes <= 0:
+        raise ValueError("JSONL write record byte limit must be positive")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         for index, record in enumerate(records):
@@ -225,7 +229,14 @@ def append_jsonl(
                 raise ValueError(
                     f"{path} exceeds JSONL write record limit: more than {max_records} records"
                 )
-            handle.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
+            line = json.dumps(record.to_dict(), sort_keys=True)
+            line_bytes = len(line.encode("utf-8")) + 1
+            if line_bytes > max_record_bytes:
+                raise ValueError(
+                    f"{path} JSONL record exceeds write byte limit: "
+                    f"{line_bytes} bytes > {max_record_bytes} bytes"
+                )
+            handle.write(line + "\n")
 
 
 def _bound_metric_value(value: Any) -> Any:

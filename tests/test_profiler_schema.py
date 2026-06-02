@@ -9,6 +9,7 @@ import pytest
 from fastgen_profiler.backends import create_backend
 from fastgen_profiler.metrics import (
     MAX_METRIC_COLLECTION_ITEMS,
+    MAX_METRIC_RECORD_JSON_BYTES,
     MAX_METRIC_TEXT_FIELD_CHARS,
     REQUIRED_PHASES,
     RunConfig,
@@ -256,6 +257,49 @@ def test_append_jsonl_rejects_more_records_than_limit(tmp_path):
         append_jsonl(config.result_jsonl, records(), max_records=1)
 
     assert len(config.result_jsonl.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_append_jsonl_rejects_record_larger_than_byte_limit(tmp_path):
+    config = RunConfig(
+        model="ltx2.3",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="write byte limit",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path,
+        result_jsonl=tmp_path / "oversized-record.jsonl",
+        save_video=False,
+        dry_run=True,
+    )
+    machine = {
+        f"field_{index}": "x" * MAX_METRIC_TEXT_FIELD_CHARS
+        for index in range(MAX_METRIC_COLLECTION_ITEMS)
+    }
+    record = make_record(
+        config,
+        run_id="run",
+        timestamp_utc="2026-01-01T00:00:00Z",
+        machine=machine,
+        phase="total",
+        seconds=0.0,
+    )
+
+    with pytest.raises(ValueError, match=f"JSONL record exceeds write byte limit: .* > {MAX_METRIC_RECORD_JSON_BYTES}"):
+        append_jsonl(config.result_jsonl, [record])
+
+    assert not config.result_jsonl.exists() or config.result_jsonl.read_text(encoding="utf-8") == ""
 
 
 def test_measurement_record_bounds_serialized_text_fields():
