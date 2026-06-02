@@ -45,7 +45,7 @@ def test_model_discovery_rejects_excessive_directory_traversal(tmp_path, monkeyp
     walked = [root / "wan-one", root / "wan-two"]
 
     monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
-    monkeypatch.setattr(models_module, "_markers", lambda path: ())
+    monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ())
 
     with pytest.raises(ValueError, match="visited more than 1 directories"):
         discover_models([root], model="wan2.2", max_dirs=1)
@@ -57,10 +57,33 @@ def test_model_discovery_rejects_excessive_candidate_accumulation(tmp_path, monk
     walked = [root / "wan-one", root / "wan-two"]
 
     monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
-    monkeypatch.setattr(models_module, "_markers", lambda path: ("config.json",))
+    monkeypatch.setattr(models_module, "_markers", lambda path, **kwargs: ("config.json",))
 
     with pytest.raises(ValueError, match="found more than 1 candidates"):
         discover_models([root], model="wan2.2", max_candidates=1)
+
+
+def test_model_discovery_rejects_excessive_marker_file_scan(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "wan2.2-large-dir"
+    model_dir.mkdir(parents=True)
+    for index in range(3):
+        (model_dir / f"nonmatch-{index}.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="scanned more than 2 files"):
+        discover_models([root], model="wan2.2", max_files=2)
+
+
+def test_model_discovery_rejects_excessive_flat_file_scan(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    for index in range(3):
+        (root / f"nonmatch-{index}.txt").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(()))
+
+    with pytest.raises(ValueError, match="scanned more than 2 files"):
+        discover_models([root], model="wan2.2", max_files=2)
 
 
 def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):

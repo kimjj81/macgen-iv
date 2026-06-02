@@ -917,7 +917,7 @@ class LTX23MLXPipeline:
             return frames
 
         self._check_host_allocation(
-            frames.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            _frame_postprocess_budget_bytes(frames),
             "video_encode frames",
         )
         self._check_memory("video_encode before")
@@ -957,7 +957,7 @@ class LTX23MLXPipeline:
 
         self._validate_frame_shape(video, "file_write")
         self._check_host_allocation(
-            video.nbytes * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER,
+            _frame_postprocess_budget_bytes(video),
             "file_write frames",
         )
         if importlib.util.find_spec("mlx_video") is None:
@@ -1159,6 +1159,14 @@ def _numpy() -> Any:
     import numpy as np
 
     return np
+
+
+def _frame_postprocess_budget_bytes(frames: Any) -> int:
+    shape_floor = math.prod(tuple(frames.shape)) * 4
+    reported_nbytes = getattr(frames, "nbytes", 0)
+    if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
+        reported_nbytes = 0
+    return max(reported_nbytes, shape_floor) * _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER
 
 
 def _normalize_video_frames(np: Any, frames: Any) -> Any:

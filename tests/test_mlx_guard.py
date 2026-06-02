@@ -5546,7 +5546,71 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
 
         frames = np.zeros((4, 256, 256, 3), dtype=np.uint8)
-        expected = frames.nbytes * 6
+        expected = 4 * 256 * 256 * 3 * 4 * 6
+        ltx = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        wan = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+            save_video=True,
+        )
+        captures: list[tuple[str, int, str]] = []
+
+        for name, pipe in (("ltx", ltx), ("wan", wan)):
+            pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
+
+            def capture(required_bytes: int, phase: str, *, pipe_name: str = name) -> None:
+                captures.append((pipe_name, required_bytes, phase))
+
+            pipe._check_host_allocation = capture  # type: ignore[method-assign]
+
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.ltx23_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+        monkeypatch.setattr(
+            "fastgen_profiler.backends.wan22_mlx_adapter.importlib.util.find_spec",
+            lambda name: None if name == "mlx_video" else object(),
+        )
+
+        for action in (
+            lambda: ltx.encode_video(frames, fps=24),
+            lambda: wan.encode_video(frames, fps=24),
+            lambda: ltx.write_output(frames, tmp_path / "ltx-out", run_id="r1"),
+            lambda: wan.write_output(frames, tmp_path / "wan-out", run_id="r1"),
+        ):
+            with pytest.raises(ModuleNotFoundError, match="before initializing MLX"):
+                action()
+
+        assert captures == [
+            ("ltx", expected, "video_encode frames"),
+            ("wan", expected, "video_encode frames"),
+            ("ltx", expected, "file_write frames"),
+            ("wan", expected, "file_write frames"),
+        ]
+
+    def test_video_postprocess_does_not_trust_underreported_frame_nbytes(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        class FakeFrames:
+            shape = (4, 256, 256, 3)
+            ndim = 4
+            nbytes = 0
+
+        frames = FakeFrames()
+        expected = 4 * 256 * 256 * 3 * 4 * 6
         ltx = LTX23MLXPipeline(
             model_path=tmp_path,
             seed=1,

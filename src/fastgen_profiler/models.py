@@ -43,6 +43,7 @@ DEFAULT_IMPORT_PATHS = {
 DEFAULT_ENV_FILE_MAX_BYTES = 1024 * 1024
 DEFAULT_MODEL_DISCOVERY_MAX_DIRS = 100_000
 DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES = 10_000
+DEFAULT_MODEL_DISCOVERY_MAX_FILES = 100_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,7 @@ def discover_generation_model_dirs(
     *,
     max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
     max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
 ) -> list[Path]:
     candidates: list[ModelCandidate] = []
     for model in TARGET_GENERATION_MODELS:
@@ -143,6 +145,7 @@ def discover_generation_model_dirs(
                 model=model,
                 max_dirs=max_dirs,
                 max_candidates=max_candidates,
+                max_files=max_files,
             )
         )
     return _dedupe_paths(candidate.path for candidate in candidates)
@@ -192,11 +195,14 @@ def discover_models(
     model: str | None = None,
     max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
     max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
 ) -> list[ModelCandidate]:
     if max_dirs <= 0:
         raise ValueError("model discovery directory limit must be positive")
     if max_candidates <= 0:
         raise ValueError("model discovery candidate limit must be positive")
+    if max_files <= 0:
+        raise ValueError("model discovery file scan limit must be positive")
     candidates: list[ModelCandidate] = []
     visited_dirs = 0
     for root in _dedupe_paths(roots):
@@ -209,7 +215,7 @@ def discover_models(
                     f"model discovery visited more than {max_dirs} directories; "
                     "narrow --model-dir or import source"
                 )
-            markers = _markers(path)
+            markers = _markers(path, max_files=max_files)
             if not markers:
                 continue
             candidate = ModelCandidate(
@@ -231,7 +237,7 @@ def discover_models(
         # model family but the directory itself has no family name, create per-file
         # candidates.
         if model is not None:
-            for file_candidate in _discover_flat_model_files(root, model=model):
+            for file_candidate in _discover_flat_model_files(root, model=model, max_files=max_files):
                 if file_candidate not in candidates:
                     candidates.append(file_candidate)
                     _check_candidate_limit(candidates, max_candidates=max_candidates)
@@ -320,7 +326,12 @@ def _check_candidate_limit(
         )
 
 
-def _discover_flat_model_files(root: Path, *, model: str) -> Iterable[ModelCandidate]:
+def _discover_flat_model_files(
+    root: Path,
+    *,
+    model: str,
+    max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES,
+) -> Iterable[ModelCandidate]:
     """Find individual model files in a flat directory (DrawThings-style).
 
     When all model weights live as .ckpt/.safetensors/.gguf files in one
@@ -334,7 +345,12 @@ def _discover_flat_model_files(root: Path, *, model: str) -> Iterable[ModelCandi
         return
 
     model_suffixes = {".ckpt", ".safetensors", ".gguf", ".mlx"}
-    for entry in entries:
+    for scanned, entry in enumerate(entries, start=1):
+        if scanned > max_files:
+            raise ValueError(
+                f"model discovery scanned more than {max_files} files in {root}; "
+                "narrow --model-dir or import source"
+            )
         if not entry.is_file():
             continue
         if entry.suffix.lower() not in model_suffixes:
@@ -353,14 +369,19 @@ def _discover_flat_model_files(root: Path, *, model: str) -> Iterable[ModelCandi
         yield candidate
 
 
-def _markers(path: Path) -> tuple[str, ...]:
+def _markers(path: Path, *, max_files: int = DEFAULT_MODEL_DISCOVERY_MAX_FILES) -> tuple[str, ...]:
     markers: list[str] = []
     try:
         children = path.iterdir()
     except OSError:
         return ()
 
-    for child in children:
+    for scanned, child in enumerate(children, start=1):
+        if scanned > max_files:
+            raise ValueError(
+                f"model discovery scanned more than {max_files} files in {path}; "
+                "narrow --model-dir or import source"
+            )
         if not child.is_file():
             continue
         if child.name in MODEL_MARKER_FILES:
