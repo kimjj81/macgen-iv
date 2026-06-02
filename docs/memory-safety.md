@@ -76,6 +76,8 @@ and clean up; unknown memory state during MLX/Metal work is unsafe.
 Large host allocation preflights must follow the same macOS telemetry rule:
 unknown pressure or swap telemetry, or critical pressure, must abort before
 large file reads, tensor materialization, NumPy conversion, or video encoding.
+Tensor-derived preflights must use real integer shapes and must rerun after
+shape-expanding operations such as latent upsampling.
 Result/report readers must also remain bounded. JSONL benchmark result files
 may be appended over many runs, so report generation must reject input files
 above a fixed byte limit and stop before accumulating an excessive number of
