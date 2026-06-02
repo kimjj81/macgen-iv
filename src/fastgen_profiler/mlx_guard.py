@@ -388,6 +388,35 @@ def mlx_cleanup() -> dict[str, object]:
     }
 
 
+def _clear_exception_traceback_frames(exc: BaseException | None) -> None:
+    if exc is None:
+        return
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        tb = current.__traceback__
+        while tb is not None:
+            try:
+                tb.tb_frame.clear()
+            except RuntimeError:
+                pass
+            tb = tb.tb_next
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+
+
+def _cleanup_after_exception(exc: BaseException | None = None) -> dict[str, object]:
+    _clear_exception_traceback_frames(exc)
+    return mlx_cleanup()
+
+
 def _env_gb_to_bytes(name: str) -> int | None:
     value = os.environ.get(name)
     if value is None or value.strip() == "":
@@ -547,7 +576,7 @@ def configure_mlx_resource_limits(
     try:
         import mlx.core as mx
     except Exception as exc:
-        mlx_cleanup()
+        _cleanup_after_exception(exc)
         raise MemoryGuardError(
             f"Memory guard [{label}]: cannot import mlx.core to set allocator limits"
         ) from exc
@@ -565,7 +594,7 @@ def configure_mlx_resource_limits(
                 status["previous_wired_limit_gb"] = round(previous / 1e9, 2)
             except Exception as exc:
                 status["wired_limit_error"] = _safe_diagnostic_value(exc)
-                mlx_cleanup()
+                _cleanup_after_exception(exc)
                 raise MemoryGuardError(
                     "Memory guard "
                     f"[{label}]: failed to set MLX wired memory limit: {_safe_diagnostic_value(exc)}"
@@ -573,7 +602,7 @@ def configure_mlx_resource_limits(
     except MemoryGuardError:
         raise
     except Exception as exc:
-        mlx_cleanup()
+        _cleanup_after_exception(exc)
         raise MemoryGuardError(
             f"Memory guard [{label}]: failed to set MLX memory limits: {_safe_diagnostic_value(exc)}"
         ) from exc
@@ -642,7 +671,14 @@ def check_memory_guard(
     Checks: free memory, memory pressure, swap file count.
     Returns status dict. Raises MemoryGuardError if insufficient.
     """
-    snap = system_snapshot()
+    try:
+        snap = system_snapshot()
+    except Exception as exc:
+        _cleanup_after_exception(exc)
+        raise MemoryGuardError(
+            f"Memory guard [{label}]: cannot capture system memory telemetry "
+            "before benchmark run."
+        ) from exc
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:
         raise MemoryGuardError(_invalid_system_snapshot_message(label, invalid_reasons))
@@ -712,7 +748,7 @@ def check_runtime_memory(label: str = "") -> SystemSnapshot:
     try:
         snap = system_snapshot()
     except Exception as exc:
-        mlx_cleanup()
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
             "during MLX/Metal run. Aborting because runtime memory state is unknown."
@@ -771,7 +807,7 @@ def _check_mlx_runtime_limit(label: str) -> None:
         active = _mlx_counter_bytes(mx.get_active_memory(), "active")
         cache = _mlx_counter_bytes(mx.get_cache_memory(), "cache")
     except Exception as exc:
-        mlx_cleanup()
+        _cleanup_after_exception(exc)
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label}]: cannot read MLX allocator memory "
             "while a configured memory limit is active."
@@ -808,7 +844,14 @@ def check_host_allocation_headroom(
             f"[{label}]: required_bytes must be a positive integer, got {_safe_diagnostic_value(required_bytes)}"
         )
     reserve_bytes = _system_reserve_bytes(reserve_bytes)
-    snap = system_snapshot()
+    try:
+        snap = system_snapshot()
+    except Exception as exc:
+        _cleanup_after_exception(exc)
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label}]: cannot capture system memory telemetry "
+            f"before allocating {required_bytes / 1e9:.1f}GB on host."
+        ) from exc
     required_with_reserve = required_bytes + reserve_bytes
     invalid_reasons = _invalid_system_snapshot_reasons(snap)
     if invalid_reasons:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import subprocess
@@ -350,6 +351,42 @@ def test_steps_benchmark_child_abort_records_cleanup_status(tmp_path, monkeypatc
             "cleanup": {"mlx_cache_cleared": True},
         }
     ]
+
+
+def test_steps_benchmark_child_abort_with_completed_cleanup_does_not_cleanup_again(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_child_abort_done_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    result_path = tmp_path / "steps" / "child.json"
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_RESULT", str(result_path))
+    monkeypatch.setenv("FASTGEN_STEPS_CHILD_STEP", "1")
+    spec.loader.exec_module(module)
+
+    abort = module.RuntimeMemoryAbort("runtime stop")
+    setattr(abort, module._CLEANUP_DONE_ATTR, True)
+    monkeypatch.setattr(
+        module,
+        "run_single",
+        lambda steps: (_ for _ in ()).throw(abort),
+    )
+    monkeypatch.setattr(
+        module,
+        "mlx_cleanup",
+        lambda: (_ for _ in ()).throw(AssertionError("cleanup must not run twice")),
+    )
+
+    assert module.run_child() == 0
+
+    records = [
+        json.loads(line)
+        for line in result_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records == [{"steps": 1, "error": "runtime stop", "aborted": True}]
 
 
 def test_steps_benchmark_child_guard_block_marks_guard_blocked(tmp_path, monkeypatch):
@@ -1706,6 +1743,60 @@ def test_steps_benchmark_heavy_mode_recovers_between_child_processes(tmp_path, m
 
     assert launched == [1, 2]
     assert recovered == ["pre-steps_2"]
+
+
+def test_steps_benchmark_parent_recovery_does_not_import_or_cleanup_mlx(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_parent_recovery_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_MULTIPLE_HEAVY", "1")
+    monkeypatch.setenv("FASTGEN_STEPS_VALUES", "1,2")
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "run_counter", lambda: 0)
+
+    launched: list[int] = []
+    guard_labels: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_child(steps):
+        launched.append(steps)
+        return {
+            "steps": steps,
+            "denoise_total_s": 1.0,
+            "vae_decode_s": 1.0,
+            "pixel_min": 0,
+            "pixel_max": 255,
+            "pixel_mean": 127.0,
+        }
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name in {"mlx", "mlx.core"}:
+            raise AssertionError("parent recovery must not initialize MLX")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(module, "run_step_in_child", fake_child)
+    monkeypatch.setattr(module, "check_memory_guard", lambda label: guard_labels.append(label) or {"free_gb": 100})
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        module,
+        "mlx_cleanup",
+        lambda: (_ for _ in ()).throw(AssertionError("parent recovery must not cleanup MLX")),
+    )
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert module.main() == 0
+
+    assert launched == [1, 2]
+    assert guard_labels == ["pre-steps_2"]
+    assert sleeps == [module.COOLDOWN_SECONDS]
 
 
 def test_steps_benchmark_heavy_mode_does_not_count_skipped_child_as_completed_run(tmp_path, monkeypatch):

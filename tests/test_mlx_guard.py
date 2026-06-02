@@ -283,6 +283,38 @@ class TestCheckMemoryGuard:
         with pytest.raises(MemoryGuardError, match="25 swap files"):
             check_memory_guard(label="swap-heavy")
 
+    def test_snapshot_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        def snapshot_failure():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("snapshot failed with heavy local")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mlx_guard, "system_snapshot", snapshot_failure)
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(MemoryGuardError, match="cannot capture system memory telemetry"):
+            check_memory_guard(label="pre-run-snapshot")
+
+        assert cleanup_calls == ["cleanup"]
+
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_darwin_fails_closed_when_telemetry_unavailable(self, mock_snap, monkeypatch):
         import fastgen_profiler.mlx_guard as mlx_guard
@@ -298,6 +330,38 @@ class TestCheckMemoryGuard:
 
         with pytest.raises(MemoryGuardError, match="cannot read vm_stat"):
             check_memory_guard(label="blind")
+
+    def test_memory_guard_snapshot_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        def snapshot_failure():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("snapshot failed with heavy local")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mlx_guard, "system_snapshot", snapshot_failure)
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(MemoryGuardError, match="cannot capture system memory telemetry"):
+            check_memory_guard(label="snapshot-failure")
+
+        assert cleanup_calls == ["cleanup"]
 
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
     def test_darwin_fails_closed_when_free_memory_unavailable_even_with_pressure(self, mock_snap, monkeypatch):
@@ -660,6 +724,84 @@ class TestCheckRuntimeMemory:
 
         mock_cleanup.assert_called_once()
 
+    def test_runtime_snapshot_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        def snapshot_failure():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("snapshot failed with heavy local")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mlx_guard, "system_snapshot", snapshot_failure)
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+        monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", None)
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry"):
+            check_runtime_memory(label="snapshot-failure")
+
+        assert cleanup_calls == ["cleanup"]
+
+    def test_runtime_mlx_counter_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+        mx = _install_fake_mlx(monkeypatch)
+
+        def counter_failure():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("counter failed with heavy local")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mx, "get_active_memory", counter_failure)
+        monkeypatch.setattr(mlx_guard, "_current_mlx_memory_limit_bytes", 1000)
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+        monkeypatch.setattr(
+            mlx_guard,
+            "system_snapshot",
+            lambda: SystemSnapshot(
+                free_bytes=80 * 1024 ** 3,
+                total_bytes=128 * 1024 ** 3,
+                pressure=0.2,
+                swap_files=0,
+                free_fraction=80 / 128,
+            ),
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot read MLX allocator memory"):
+            check_runtime_memory(label="counter-failure")
+
+        assert cleanup_calls == ["cleanup"]
+
     @pytest.mark.parametrize("counter_value", [-1, "100", 1.5, True])
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
@@ -944,6 +1086,43 @@ class TestConfigureMlxResourceLimits:
             )
 
         assert cleanup_calls == ["cleanup"]
+
+    def test_limit_set_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+
+        mx = _install_fake_mlx(monkeypatch)
+        monkeypatch.setenv("FASTGEN_TEST_SKIP_MLX_IMPORT_PROBE", "1")
+        target_ref: weakref.ReferenceType[object] | None = None
+
+        class HeavyTarget:
+            pass
+
+        def failing_set_memory_limit(value):
+            nonlocal target_ref
+            target = HeavyTarget()
+            target_ref = weakref.ref(target)
+            raise RuntimeError("limit failed")
+
+        def cleanup():
+            gc.collect()
+            assert target_ref is not None
+            assert target_ref() is None
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mx, "set_memory_limit", failing_set_memory_limit)
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+
+        with pytest.raises(MemoryGuardError, match="failed to set MLX memory limits"):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=None,
+                ),
+                label="limit-fail",
+            )
 
     def test_limit_set_failure_does_not_stringify_unsafe_exception(self, monkeypatch):
         mx = _install_fake_mlx(monkeypatch)
@@ -1461,6 +1640,38 @@ class TestAllocationBudget:
     def test_host_allocation_rejects_invalid_required_bytes(self, required_bytes):
         with pytest.raises(MemoryGuardError, match="required_bytes must be a positive integer"):
             check_host_allocation_headroom(required_bytes, label="numpy")  # type: ignore[arg-type]
+
+    def test_host_allocation_snapshot_failure_clears_traceback_locals_before_cleanup(self, monkeypatch):
+        import gc
+        import fastgen_profiler.mlx_guard as mlx_guard
+
+        class HeavyLocal:
+            pass
+
+        ref: weakref.ReferenceType[object] | None = None
+
+        def snapshot_failure():
+            nonlocal ref
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            raise RuntimeError("snapshot failed with heavy local")
+
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref is not None
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+            return {"freed_gb": 0}
+
+        monkeypatch.setattr(mlx_guard, "system_snapshot", snapshot_failure)
+        monkeypatch.setattr(mlx_guard, "mlx_cleanup", cleanup)
+
+        with pytest.raises(RuntimeMemoryAbort, match="cannot capture system memory telemetry"):
+            check_host_allocation_headroom(2 * 1024 ** 3, label="numpy")
+
+        assert cleanup_calls == ["cleanup"]
 
     @patch("fastgen_profiler.mlx_guard.mlx_cleanup")
     @patch("fastgen_profiler.mlx_guard.system_snapshot")
