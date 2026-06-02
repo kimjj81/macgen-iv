@@ -1189,6 +1189,55 @@ def test_profile_command_fails_closed_on_oversized_record_stream(tmp_path, monke
     assert "profile record limit exceeded" in records[0]["error"]
 
 
+def test_profile_report_record_extension_stops_before_overflow_to_dict(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, "MAX_REPORT_RECORDS", 1)
+
+    config = cli_module.RunConfig(
+        model="wan2.2",
+        backend="stub",
+        model_path=None,
+        model_id=None,
+        model_source_root=None,
+        prompt="prompt",
+        negative_prompt="",
+        seed=1,
+        width=256,
+        height=256,
+        frames=4,
+        fps=4,
+        steps=1,
+        guidance=1.0,
+        quant="none",
+        cache="none",
+        compile="off",
+        output_dir=tmp_path / "unused",
+        result_jsonl=tmp_path / "unused.jsonl",
+        save_video=False,
+        dry_run=True,
+    )
+    first_record = cli_module.make_record(
+        config,
+        run_id="run-1",
+        timestamp_utc="2026-01-01T00:00:00Z",
+        machine={},
+        phase="total",
+        seconds=0.0,
+    )
+
+    class OverflowRecord:
+        def to_dict(self):
+            raise AssertionError("overflow record must not be materialized")
+
+    all_records: list[dict[str, object]] = []
+    limit_error = cli_module._extend_profile_report_records(
+        all_records,
+        [first_record, OverflowRecord()],
+    )
+
+    assert len(all_records) == 1
+    assert "profile record limit exceeded" in (limit_error or "")
+
+
 def test_mlx_inner_memory_guard_error_records_cleanup_status(tmp_path, monkeypatch):
     from fastgen_profiler.mlx_guard import MemoryGuardError
 

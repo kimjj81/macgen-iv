@@ -435,6 +435,18 @@ def _profile_record_limit_message(total_count: int) -> str:
     )
 
 
+def _extend_profile_report_records(
+    all_records: list[dict[str, object]],
+    records: list[MeasurementRecord],
+) -> str | None:
+    for record in records:
+        total_count = len(all_records) + 1
+        if total_count > MAX_REPORT_RECORDS:
+            return _profile_record_limit_message(total_count)
+        all_records.append(record.to_dict())
+    return None
+
+
 def _backend_is_scaffold_only(backend: object) -> bool:
     return bool(getattr(backend, "scaffold_only", False))
 
@@ -704,7 +716,10 @@ def profile_command(options: RunOptions) -> int:
                 ),
             )
             append_jsonl(options.result_jsonl, records)
-            all_records.extend(record.to_dict() for record in records)
+            limit_error = _extend_profile_report_records(all_records, records)
+            if limit_error is not None:
+                typer.echo(f"[guard] report limit blocked: {limit_error}")
+                break
         report_path = options.result_jsonl.with_suffix(".md")
         report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
         _print_profile_summary(all_records, options.result_jsonl, report_path)
@@ -751,7 +766,9 @@ def profile_command(options: RunOptions) -> int:
                     candidate=candidate,
                 )
                 append_jsonl(options.result_jsonl, records)
-                all_records.extend(record.to_dict() for record in records)
+                limit_error = _extend_profile_report_records(all_records, records)
+                if limit_error is not None:
+                    typer.echo(f"[guard] report limit blocked: {limit_error}")
                 break
             parent_error = _mlx_parent_process_execution_error(options, backend)
             if parent_error is not None:
@@ -765,7 +782,9 @@ def profile_command(options: RunOptions) -> int:
                     candidate=candidate,
                 )
                 append_jsonl(options.result_jsonl, records)
-                all_records.extend(record.to_dict() for record in records)
+                limit_error = _extend_profile_report_records(all_records, records)
+                if limit_error is not None:
+                    typer.echo(f"[guard] report limit blocked: {limit_error}")
                 break
 
         memory_aborted = False
@@ -831,7 +850,11 @@ def profile_command(options: RunOptions) -> int:
             )
 
         append_jsonl(options.result_jsonl, records)
-        all_records.extend(record.to_dict() for record in records)
+        report_limit_error = _extend_profile_report_records(all_records, records)
+        if report_limit_error is not None:
+            memory_guard_failed = True
+            typer.echo(f"[guard] report limit blocked: {report_limit_error}")
+            break
         if options.backend == "mlx" and _records_have_errors(records):
             memory_guard_failed = True
         if (
@@ -851,7 +874,11 @@ def profile_command(options: RunOptions) -> int:
             reason="skipped: stress preset is currently limited to wan2.2",
         )
         append_jsonl(options.result_jsonl, records)
-        all_records.extend(record.to_dict() for record in records)
+        limit_error = _extend_profile_report_records(all_records, records)
+        if limit_error is not None:
+            memory_guard_failed = True
+            typer.echo(f"[guard] report limit blocked: {limit_error}")
+            break
 
     report_path = options.result_jsonl.with_suffix(".md")
     report_path.write_text(render_markdown_report(all_records), encoding="utf-8")
