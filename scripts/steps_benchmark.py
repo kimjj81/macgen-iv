@@ -308,8 +308,7 @@ def run_single(steps: int):
     from PIL import Image
     img = None
     for idx in range(FRAMES):
-        img = Image.fromarray(video[idx])
-        img.save(str(step_dir / f"frame_{idx:03d}.png"))
+        img = _save_png_frame(Image, video, idx, step_dir=step_dir, label=label)
 
     total = result["denoise_total_s"] + result["vae_decode_s"]
     print(f"  DONE: denoise={result['denoise_total_s']}s  vae={result['vae_decode_s']}s  "
@@ -404,6 +403,19 @@ def _video_pixel_stat_float(video: Any, metric: str, *, label: str) -> float:
         mlx_cleanup()
         raise RuntimeMemoryAbort(
             f"Runtime memory abort [{label} {metric}]: decoded video pixel metric failed; "
+            "aborting because host materialization state may be unsafe."
+        ) from exc
+
+
+def _save_png_frame(image_module: Any, video: Any, index: int, *, step_dir: Path, label: str) -> Any:
+    try:
+        image = image_module.fromarray(video[index])
+        image.save(str(step_dir / f"frame_{index:03d}.png"))
+        return image
+    except Exception as exc:
+        mlx_cleanup()
+        raise RuntimeMemoryAbort(
+            f"Runtime memory abort [{label} png frame {index}]: PNG frame save failed; "
             "aborting because host materialization state may be unsafe."
         ) from exc
 

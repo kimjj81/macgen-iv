@@ -982,6 +982,76 @@ def test_steps_benchmark_pixel_metric_failure_aborts_and_cleans_up(tmp_path, mon
     assert cleanup_calls == ["cleanup"]
 
 
+@pytest.mark.parametrize("failure", ["fromarray", "save"])
+def test_steps_benchmark_png_save_failure_aborts_and_cleans_up(tmp_path, monkeypatch, failure):
+    import importlib.util
+    import numpy as np
+    import fastgen_profiler.backends.ltx23_mlx_adapter as ltx_adapter
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location(f"steps_benchmark_png_failure_{failure}_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_STEPS_ALLOW_HEAVY", "1")
+    monkeypatch.setenv("FASTGEN_STEPS_WIDTH", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_HEIGHT", "4")
+    monkeypatch.setenv("FASTGEN_STEPS_FRAMES", "2")
+    spec.loader.exec_module(module)
+
+    class FakePipeline:
+        def load_model(self):
+            return {}
+
+        def prepare_prompt(self, *, prompt, negative_prompt):
+            return {"prompt": prompt, "negative_prompt": negative_prompt}
+
+        def encode_text(self, prepared):
+            return object()
+
+        def init_latents(self, *, seed, width, height, frames):
+            return object()
+
+        def denoise_step(self, latents, *, step_index, steps, guidance, cache):
+            return latents
+
+        def decode(self, latents):
+            return np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+    class FakeImage:
+        def save(self, path):
+            if failure == "save":
+                raise AssertionError("png save failed")
+
+    def fake_fromarray(frame):
+        if failure == "fromarray":
+            raise AssertionError("png frame materialization failed")
+        return FakeImage()
+
+    cleanup_calls: list[str] = []
+    fake_mx = types.SimpleNamespace(eval=lambda *args: None, array=lambda value: value)
+    fake_image_module = types.SimpleNamespace(fromarray=fake_fromarray)
+
+    monkeypatch.setattr(module, "check_memory_guard", lambda label: {"free_gb": 100})
+    monkeypatch.setattr(module, "check_run_allocation_budget", lambda **kwargs: {"shape_floor_gb": 1})
+    monkeypatch.setattr(module, "check_runtime_memory", lambda label: None)
+    monkeypatch.setattr(module, "mlx_cleanup", lambda: cleanup_calls.append("cleanup") or {"freed_gb": 0})
+    monkeypatch.setattr(module, "increment_run_counter", lambda: 1)
+    monkeypatch.setattr(module, "check_host_allocation_headroom", lambda required, *, label: None)
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(ltx_adapter, "create_ltx23_pipeline", lambda **kwargs: FakePipeline())
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=fake_mx))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=fake_image_module))
+    monkeypatch.setitem(sys.modules, "PIL.Image", fake_image_module)
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="PNG frame save failed"):
+        module.run_single(1)
+
+    assert cleanup_calls == ["cleanup"]
+
+
 def test_steps_benchmark_shape_validation_rejects_unsafe_dimensions_without_repr(tmp_path, monkeypatch):
     import importlib.util
 
