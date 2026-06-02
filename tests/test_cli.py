@@ -5,6 +5,7 @@ import json
 import sys
 from unittest.mock import patch
 
+import click
 import pytest
 
 import fastgen_profiler.cli as cli_module
@@ -2173,6 +2174,30 @@ def test_run_command_missing_required_values_fails_non_interactively():
         assert "--model" in str(exc)
     else:
         raise AssertionError("run without required values should fail when non-interactive")
+
+
+def test_main_bad_parameter_does_not_stringify_unsafe_exception(monkeypatch):
+    class UnsafeValue:
+        def __repr__(self):
+            raise AssertionError("main error handling must not call repr on unknown values")
+
+        def __str__(self):
+            raise AssertionError("main error handling must not call str on unknown values")
+
+    class UnsafeBadParameter(click.BadParameter):
+        def __str__(self):
+            raise AssertionError("main error handling must not call BadParameter.__str__")
+
+    class FakeCommand:
+        def main(self, **kwargs):
+            raise UnsafeBadParameter(UnsafeValue())
+
+    monkeypatch.setattr(cli_module.typer.main, "get_command", lambda app: FakeCommand())
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run"])
+
+    assert "UnsafeValue" in str(exc_info.value)
 
 
 def _read_jsonl(path):

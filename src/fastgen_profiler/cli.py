@@ -1098,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
             standalone_mode=False,
         )
     except click.BadParameter as exc:
-        raise SystemExit(str(exc)) from exc
+        raise SystemExit(_safe_exception_text(exc)) from exc
     except click.exceptions.Exit as exc:
         return int(exc.exit_code or 0)
     return int(result or 0)
@@ -1657,6 +1657,19 @@ def _safe_summary_text(value: object) -> str:
         return str(value)
     value_type = type(value)
     return f"<{value_type.__module__}.{value_type.__qualname__}>"
+
+
+def _safe_exception_text(exc: BaseException) -> str:
+    parts = [_summary_text(arg) for arg in exc.args[:4]]
+    if not parts:
+        exc_type = type(exc)
+        return _summary_text(f"<{exc_type.__module__}.{exc_type.__qualname__}>")
+    if len(exc.args) > 4:
+        parts.append("...<truncated>")
+    if len(parts) == 1:
+        return parts[0]
+    exc_type = type(exc)
+    return _summary_text(f"{exc_type.__module__}.{exc_type.__qualname__}: {', '.join(parts)}")
 
 
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:
