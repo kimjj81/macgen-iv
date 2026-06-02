@@ -3971,6 +3971,10 @@ import fastgen_profiler.backends.wan22_mlx_adapter
             ("max_position_embeddings", "2", "max_position_embeddings=.*positive structural dimension"),
             ("max_position_embeddings", 2.5, "max_position_embeddings=.*positive structural dimension"),
             ("hidden_size", "16", "hidden_size=.*positive structural dimension"),
+            ("head_dim", "16", "head_dim=.*positive structural dimension"),
+            ("num_key_value_heads", 1.5, "num_key_value_heads=.*positive structural dimension"),
+            ("sliding_window", "8", "sliding_window=.*positive structural dimension"),
+            ("sliding_window_pattern", 0, "sliding_window_pattern=.*positive structural dimension"),
         ],
     )
     def test_ltx23_text_encoder_rejects_non_integer_token_budget_config(
@@ -4000,6 +4004,47 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeMemoryAbort, match=message):
+            pipe._preflight_text_prompt_tokens("prompt", text_encoder_dir, tokenizer_dir)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "head_dim",
+            "num_key_value_heads",
+            "sliding_window",
+            "sliding_window_pattern",
+        ],
+    )
+    def test_ltx23_text_encoder_rejects_oversized_structural_config(
+        self,
+        tmp_path,
+        monkeypatch,
+        field,
+    ):
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder_dir = tmp_path / "text_encoder"
+        tokenizer_dir = tmp_path / "tokenizer"
+        _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
+        config_path = text_encoder_dir / "config.json"
+        full_config = json.loads(config_path.read_text(encoding="utf-8"))
+        full_config["text_config"][field] = 65_537
+        config_path.write_text(json.dumps(full_config), encoding="utf-8")
+        _install_fake_transformers_tokenizer(monkeypatch, token_count=1)
+
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        pipe._check_file_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
+        pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeMemoryAbort, match=rf"{field}=65537 exceeds safe structural dimension"):
             pipe._preflight_text_prompt_tokens("prompt", text_encoder_dir, tokenizer_dir)
 
     def test_wan22_text_encoder_rejects_token_sequence_before_external_encode(self, tmp_path, monkeypatch):

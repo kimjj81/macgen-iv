@@ -276,12 +276,23 @@ class LTX23MLXPipeline:
             text_config.get("max_position_embeddings", 1),
             "max_position_embeddings",
         )
+        head_dim = _positive_structural_int(text_config.get("head_dim", hidden_size), "head_dim")
+        kv_heads = _positive_structural_int(text_config.get("num_key_value_heads", heads), "num_key_value_heads")
+        sliding_window = _positive_structural_int(text_config.get("sliding_window", max_positions), "sliding_window")
+        sliding_window_pattern = _positive_structural_int(
+            text_config.get("sliding_window_pattern", 1),
+            "sliding_window_pattern",
+        )
         for key, value in {
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "num_hidden_layers": layers,
             "vocab_size": vocab_size,
             "num_attention_heads": heads,
+            "head_dim": head_dim,
+            "num_key_value_heads": kv_heads,
+            "sliding_window": sliding_window,
+            "sliding_window_pattern": sliding_window_pattern,
             "max_position_embeddings": max_positions,
         }.items():
             if value <= 0:

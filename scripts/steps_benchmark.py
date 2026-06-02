@@ -281,7 +281,7 @@ def run_single(steps: int):
 
     # Quality metrics
     check_host_allocation_headroom(
-        video.nbytes * VIDEO_STATS_ALLOCATION_MULTIPLIER,
+        _video_frame_budget_bytes(video, multiplier=VIDEO_STATS_ALLOCATION_MULTIPLIER),
         label=f"{label} quality metrics",
     )
     result["video_shape"] = list(video.shape)
@@ -292,7 +292,7 @@ def run_single(steps: int):
 
     # Save frames as PNG
     check_host_allocation_headroom(
-        video.nbytes * PNG_FRAME_ALLOCATION_MULTIPLIER,
+        _video_frame_budget_bytes(video, multiplier=PNG_FRAME_ALLOCATION_MULTIPLIER),
         label=f"{label} png frames",
     )
     from PIL import Image
@@ -326,6 +326,14 @@ def _check_decoded_video_shape(video, *, label: str) -> None:
         raise RuntimeMemoryAbort(
             f"decoded benchmark video must have shape {expected}, got {actual} for {label}"
         )
+
+
+def _video_frame_budget_bytes(video: Any, *, multiplier: int) -> int:
+    shape_floor = FRAMES * HEIGHT * WIDTH * 3 * 4
+    reported_nbytes = getattr(video, "nbytes", 0)
+    if not isinstance(reported_nbytes, int) or isinstance(reported_nbytes, bool) or reported_nbytes < 0:
+        reported_nbytes = 0
+    return max(reported_nbytes, shape_floor) * multiplier
 
 
 def run_child() -> int:
