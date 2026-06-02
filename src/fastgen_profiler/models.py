@@ -148,6 +148,7 @@ def discover_generation_model_dirs(
                 max_files=max_files,
             )
         )
+        _check_candidate_limit(candidates, max_candidates=max_candidates)
     return _dedupe_paths(candidate.path for candidate in candidates)
 
 

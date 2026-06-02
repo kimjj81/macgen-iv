@@ -158,6 +158,19 @@ def test_generation_model_dirs_returns_leaf_wan_ltx_directories(tmp_path):
     assert dirs == [wan_model.resolve(), ltx_model.resolve()]
 
 
+def test_generation_model_dirs_enforces_global_candidate_limit(tmp_path):
+    root = tmp_path / "models"
+    wan_model = root / "wan2.2-video"
+    ltx_model = root / "ltx2.3-video"
+    wan_model.mkdir(parents=True)
+    ltx_model.mkdir(parents=True)
+    (wan_model / "model.safetensors").write_text("", encoding="utf-8")
+    (ltx_model / "model.safetensors").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="found more than 1 candidates"):
+        discover_generation_model_dirs([root], max_candidates=1)
+
+
 def test_model_dirs_from_env_and_cli_dirs_are_combined(tmp_path):
     env_dir = tmp_path / "env-models"
     family_dir = tmp_path / "wan-models"
