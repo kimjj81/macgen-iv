@@ -349,10 +349,18 @@ def _bounded_shape_tuple(value: Any, *, expected_rank: int, label: str) -> tuple
             )
         if not isinstance(dim, int) or isinstance(dim, bool):
             raise RuntimeMemoryAbort(
-                f"decoded benchmark video shape contains non-integer dimension {dim!r} for {label}"
+                "decoded benchmark video shape contains non-integer dimension "
+                f"{_shape_dim_text(dim)} for {label}"
             )
         dims.append(dim)
     return tuple(dims)
+
+
+def _shape_dim_text(value: Any) -> str:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return str(value)
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
 
 
 def _video_frame_budget_bytes(video: Any, *, multiplier: int) -> int:

@@ -826,6 +826,28 @@ def test_steps_benchmark_run_single_reuses_validated_video_shape(tmp_path, monke
     assert len(saved) == 2
 
 
+def test_steps_benchmark_shape_validation_rejects_unsafe_dimensions_without_repr(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_shape_dim_repr_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+
+    class UnsafeDim:
+        def __repr__(self):
+            raise AssertionError("steps shape guard must not call repr on unknown dimensions")
+
+    class FakeVideo:
+        shape = (2, 4, 4, UnsafeDim())
+
+    with pytest.raises(module.RuntimeMemoryAbort, match="UnsafeDim"):
+        module._check_decoded_video_shape(FakeVideo(), label="quality metrics")
+
+
 def test_steps_benchmark_mlx_eval_failure_aborts_and_cleans_up(tmp_path, monkeypatch):
     import importlib.util
     import fastgen_profiler.backends.ltx23_mlx_adapter as ltx_adapter
