@@ -7,10 +7,12 @@ from datetime import UTC, datetime
 import hashlib
 from importlib import metadata
 import json
+import os
 import platform
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable
 import uuid
 
@@ -32,6 +34,7 @@ DEFAULT_JSONL_READ_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_JSONL_READ_MAX_RECORDS = 100_000
 MAX_METRIC_TEXT_FIELD_CHARS = 2_048
 MAX_METRIC_COLLECTION_ITEMS = 256
+MAX_MACHINE_METADATA_OUTPUT_BYTES = 16 * 1024
 
 
 @dataclass(slots=True)
@@ -284,15 +287,16 @@ def _sysctl_value(name: str) -> str | None:
     if sys.platform != "darwin":
         return None
     try:
-        result = subprocess.run(
+        returncode, stdout = _run_bounded_stdout(
             ["sysctl", "-n", name],
-            check=True,
-            capture_output=True,
-            text=True,
+            max_bytes=MAX_MACHINE_METADATA_OUTPUT_BYTES,
+            timeout=5,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() or None
+    if returncode != 0:
+        return None
+    return stdout.strip() or None
 
 
 def _sysctl_int(name: str) -> int | None:
@@ -303,3 +307,25 @@ def _sysctl_int(name: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _run_bounded_stdout(args: list[str], *, max_bytes: int, timeout: float) -> tuple[int, str]:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+
+    with tempfile.TemporaryFile() as stdout:
+        result = subprocess.run(
+            args,
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        stdout.seek(0, os.SEEK_END)
+        size = stdout.tell()
+        if size > max_bytes:
+            raise OSError(
+                f"{args[0]} output exceeded metadata limit: {size} bytes > {max_bytes} bytes"
+            )
+        stdout.seek(0)
+        data = stdout.read(max_bytes)
+    return result.returncode, data.decode("utf-8", errors="replace")

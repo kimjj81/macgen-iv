@@ -113,6 +113,45 @@ def test_machine_metadata_does_not_import_mlx(monkeypatch):
     assert "mlx.core" not in sys.modules
 
 
+def test_machine_metadata_sysctl_does_not_capture_unbounded_output(monkeypatch):
+    import subprocess
+
+    import fastgen_profiler.metrics as metrics
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(args, **kwargs):
+        kwargs["stdout"].write(b"Apple M4 Pro\n" if args[-1] == "machdep.cpu.brand_string" else b"123456\n")
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(metrics.sys, "platform", "darwin")
+    monkeypatch.setattr(metrics.subprocess, "run", fake_run)
+
+    metadata = metrics.machine_metadata()
+
+    assert metadata["chip"] == "Apple M4 Pro"
+    assert metadata["total_memory"] == 123456
+    assert calls
+    assert all(call["stderr"] is subprocess.DEVNULL for call in calls)
+    assert all("capture_output" not in call for call in calls)
+
+
+def test_machine_metadata_sysctl_treats_oversized_output_as_unknown(monkeypatch):
+    import subprocess
+
+    import fastgen_profiler.metrics as metrics
+
+    def fake_run(args, **kwargs):
+        kwargs["stdout"].write(b"x" * (metrics.MAX_MACHINE_METADATA_OUTPUT_BYTES + 1))
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(metrics.sys, "platform", "darwin")
+    monkeypatch.setattr(metrics.subprocess, "run", fake_run)
+
+    assert metrics._sysctl_value("machdep.cpu.brand_string") is None
+
+
 def test_read_jsonl_rejects_file_larger_than_limit(tmp_path):
     path = tmp_path / "oversized.jsonl"
     path.write_text('{"phase":"total"}\n{"phase":"denoise_step"}\n', encoding="utf-8")
