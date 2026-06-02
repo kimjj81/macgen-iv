@@ -4189,6 +4189,49 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         with pytest.raises(RuntimeMemoryAbort, match="cannot scan"):
             pipe._check_directory_load(tmp_path / "missing-dir", "read missing")
 
+    def test_ltx23_directory_preflight_rejects_excessive_recursive_scan(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        model_dir = tmp_path / "vae"
+        nested = model_dir / "nested"
+        nested.mkdir(parents=True)
+        (nested / "model.safetensors").write_bytes(b"x")
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PRELOAD_SCAN_DIRS", 1)
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="directory scan exceeded 1 directories"):
+            pipe._check_directory_load(model_dir, "read vae")
+
+    def test_ltx23_flat_shard_listing_rejects_excessive_file_scan(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+
+        text_encoder = tmp_path / "text"
+        text_encoder.mkdir()
+        (text_encoder / "config.json").write_text("{}", encoding="utf-8")
+        (text_encoder / "a.safetensors").write_bytes(b"x")
+        (text_encoder / "b.safetensors").write_bytes(b"x")
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PRELOAD_SCAN_FILES", 1)
+        pipe = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="file scan exceeded 1 files"):
+            pipe._preflight_text_encoder_assets(text_encoder)
+
     def test_tokenizer_preflight_checks_file_size_before_loading(self, tmp_path):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
         from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
@@ -4222,6 +4265,39 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         assert guard.call_args_list[0].kwargs == {"label": "ltx2.3 read tokenizer"}
         assert guard.call_args_list[1].args == (500,)
         assert guard.call_args_list[1].kwargs == {"label": "wan2.2 read tokenizer"}
+
+    def test_tokenizer_preflight_rejects_excessive_file_scan(self, tmp_path, monkeypatch):
+        from fastgen_profiler.backends import ltx23_mlx_adapter, wan22_mlx_adapter
+        from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
+        from fastgen_profiler.backends.wan22_mlx_adapter import Wan22MLXPipeline
+
+        tokenizer_dir = tmp_path / "tokenizer"
+        tokenizer_dir.mkdir()
+        (tokenizer_dir / "tokenizer.json").write_bytes(b"x")
+        (tokenizer_dir / "tokenizer_config.json").write_bytes(b"x")
+        monkeypatch.setattr(ltx23_mlx_adapter, "_MAX_PRELOAD_SCAN_FILES", 1)
+        monkeypatch.setattr(wan22_mlx_adapter, "_MAX_PRELOAD_SCAN_FILES", 1)
+        ltx = LTX23MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+        wan = Wan22MLXPipeline(
+            model_path=tmp_path,
+            seed=1,
+            width=256,
+            height=256,
+            frames=4,
+            steps=1,
+        )
+
+        with pytest.raises(RuntimeMemoryAbort, match="file scan exceeded 1 files"):
+            ltx._check_tokenizer_load(tokenizer_dir, "read tokenizer")
+        with pytest.raises(RuntimeMemoryAbort, match="file scan exceeded 1 files"):
+            wan._check_tokenizer_load(tokenizer_dir, "read tokenizer")
 
     def test_ltx23_text_encoder_preflight_runs_before_mlx_import(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline

@@ -20,6 +20,8 @@ from typing import Any
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
+_MAX_PRELOAD_SCAN_DIRS = 10_000
+_MAX_PRELOAD_SCAN_FILES = 10_000
 
 
 def _flatten_parameter_names(parameters: Any, prefix: str = "") -> set[str]:
@@ -138,37 +140,19 @@ class LTX23MLXPipeline:
 
     def _check_directory_load(self, path: Path, phase: str) -> None:
         if not path.is_dir():
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
+            _raise_runtime_abort(
                 f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
             )
-        try:
-            total = sum(
-                file.stat().st_size
-                for file in path.rglob("*.safetensors")
-                if file.is_file()
-            )
-        except OSError as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
-                f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
-            ) from exc
+        total = _recursive_safetensor_size(path, phase)
         if total > 0:
             self._check_host_allocation(total * 2, phase)
 
     def _check_tokenizer_load(self, path: Path, phase: str) -> None:
         if not path.is_dir():
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
+            _raise_runtime_abort(
                 f"cannot scan {path} before loading {phase}; refusing to load tokenizer without host allocation preflight"
             )
-        try:
-            total = sum(file.stat().st_size for file in path.iterdir() if file.is_file())
-        except OSError as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
-                f"cannot scan {path} before loading {phase}; refusing to load tokenizer without host allocation preflight"
-            ) from exc
+        total = _flat_file_size_total(path, phase)
         if total > 0:
             self._check_host_allocation(total * 4, phase)
 
@@ -327,7 +311,7 @@ class LTX23MLXPipeline:
                 f"  {config_path}\n"
                 "Refusing to initialize MLX text encoder before local config is present."
             )
-        shards = sorted([f.name for f in text_encoder_dir.iterdir() if f.is_file() and f.name.endswith(".safetensors")])
+        shards = _flat_safetensor_names(text_encoder_dir, "preflight text_encoder weights")
         if not shards:
             raise FileNotFoundError(
                 "LTX2.3 text encoder weights not found. Expected at least one .safetensors shard in:\n"
@@ -401,7 +385,7 @@ class LTX23MLXPipeline:
         self._check_directory_load(transformer_dir, "preflight transformer")
         config_path = transformer_dir / "config.json"
         config_dict = self._preflight_config_shape(config_path)
-        shards = sorted([f for f in os.listdir(transformer_dir) if f.endswith(".safetensors")])
+        shards = _flat_safetensor_names(transformer_dir, "preflight transformer weights")
         if not shards:
             raise FileNotFoundError(
                 "LTX2.3 transformer weights not found. Expected at least one .safetensors shard in:\n"
@@ -845,11 +829,7 @@ class LTX23MLXPipeline:
                 "Ensure the LTX-2.3-distilled-mlx model includes vae/decoder/."
             )
         self._check_directory_load(vae_decoder_dir, "preflight vae_decoder")
-        vae_shards = sorted(
-            path.name
-            for path in vae_decoder_dir.iterdir()
-            if path.is_file() and path.name.endswith(".safetensors")
-        )
+        vae_shards = _flat_safetensor_names(vae_decoder_dir, "preflight vae_decoder weights")
         if not vae_shards:
             raise FileNotFoundError(
                 "LTX2.3 VAE decoder weights not found. Expected at least one .safetensors file in:\n"
@@ -1047,6 +1027,100 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
             f"LTX2.3 {label} at {path} must be a JSON object; refusing to construct MLX model"
         )
     return config
+
+
+def _recursive_safetensor_size(path: Path, phase: str) -> int:
+    total = 0
+    visited_dirs = 0
+    scanned_files = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        visited_dirs += 1
+        if visited_dirs > _MAX_PRELOAD_SCAN_DIRS:
+            _raise_runtime_abort(
+                f"cannot scan {path} before loading {phase}; directory scan exceeded "
+                f"{_MAX_PRELOAD_SCAN_DIRS} directories"
+            )
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        _raise_runtime_abort(
+                            f"cannot scan {entry.path} before loading {phase}; "
+                            "refusing to load without host allocation preflight"
+                        )
+                    scanned_files += 1
+                    if scanned_files > _MAX_PRELOAD_SCAN_FILES:
+                        _raise_runtime_abort(
+                            f"cannot scan {path} before loading {phase}; file scan exceeded "
+                            f"{_MAX_PRELOAD_SCAN_FILES} files"
+                        )
+                    if entry.name.endswith(".safetensors"):
+                        try:
+                            total += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            _raise_runtime_abort(
+                                f"cannot stat {entry.path} before loading {phase}; "
+                                "refusing to load without host allocation preflight"
+                            )
+        except OSError:
+            _raise_runtime_abort(
+                f"cannot scan {current} before loading {phase}; refusing to load without host allocation preflight"
+            )
+    return total
+
+
+def _flat_file_size_total(path: Path, phase: str) -> int:
+    total = 0
+    scanned = 0
+    try:
+        for entry in path.iterdir():
+            scanned += 1
+            if scanned > _MAX_PRELOAD_SCAN_FILES:
+                _raise_runtime_abort(
+                    f"cannot scan {path} before loading {phase}; file scan exceeded "
+                    f"{_MAX_PRELOAD_SCAN_FILES} files"
+                )
+            if entry.is_file():
+                total += entry.stat().st_size
+    except OSError:
+        _raise_runtime_abort(
+            f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
+        )
+    return total
+
+
+def _flat_safetensor_names(path: Path, phase: str) -> list[str]:
+    names: list[str] = []
+    scanned = 0
+    try:
+        for entry in path.iterdir():
+            scanned += 1
+            if scanned > _MAX_PRELOAD_SCAN_FILES:
+                _raise_runtime_abort(
+                    f"cannot scan {path} before loading {phase}; file scan exceeded "
+                    f"{_MAX_PRELOAD_SCAN_FILES} files"
+                )
+            if entry.is_file() and entry.name.endswith(".safetensors"):
+                names.append(entry.name)
+    except OSError:
+        _raise_runtime_abort(
+            f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
+        )
+    return sorted(names)
+
+
+def _raise_runtime_abort(message: str) -> None:
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    raise RuntimeMemoryAbort(message)
 
 
 def _numpy() -> Any:

@@ -32,6 +32,9 @@ initialized. Wan2.2 and LTX2.3 local adapters must reject missing config files
 before importing `mlx.core` or `mlx_video` model modules.
 Local model config JSON files must be size-capped and verified as JSON objects
 before parser allocation or MLX/video package imports.
+Local asset preload scans must cap directory and file counts before summing
+weights or tokenizer files, because the scan itself runs before model package
+loading and outside MLX allocator counters.
 
 `mlx_cleanup()` must not initialize MLX in a fresh process. It may only clear
 MLX caches when `mlx.core` is already loaded in the current process.
@@ -81,6 +84,9 @@ run before any MLX-specific guard is active.
 Model discovery must also cap directory traversal and candidate accumulation.
 Users can point `--model-dir` or import sources at very large directory trees,
 and discovery runs before any MLX-specific guard is active.
+Adapter-local preload scans must follow the same rule. Recursive weight
+directory scans and flat tokenizer/shard listings must cap scanned directories
+and files before collecting names or summing file sizes.
 Video postprocess and frame export preflights must reserve more than the input
 frame buffer because lower-level encoders and image writers may allocate
 contiguous, converted, or temporary buffers outside MLX allocator counters.
@@ -116,6 +122,9 @@ Direct benchmark scripts must be safe by default.
   step-count, FPS, timeout, and child I/O overrides must also have hard caps so
   malformed direct-script invocations cannot request unbounded control
   structures or obviously unsafe MLX workloads before guard checks.
+- Direct-script prompt environment variables must be capped at import time, so
+  safe default invocations cannot carry oversized prompt text into later guard,
+  tokenizer, or result serialization paths.
 - Child-mode environment variables must also be validated: the step count must
   be positive, and the child result path must remain inside the configured
   output directory.

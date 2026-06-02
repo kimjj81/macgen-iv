@@ -139,6 +139,25 @@ def test_steps_benchmark_rejects_too_many_step_values(tmp_path, monkeypatch):
         spec.loader.exec_module(module)
 
 
+@pytest.mark.parametrize("env_name", ["FASTGEN_STEPS_PROMPT", "FASTGEN_STEPS_NEGATIVE_PROMPT"])
+def test_steps_benchmark_rejects_oversized_prompt_env_at_import(tmp_path, monkeypatch, env_name):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_large_prompt_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    monkeypatch.setenv("FASTGEN_MAX_PROMPT_CHARS", "8")
+    if env_name == "FASTGEN_STEPS_NEGATIVE_PROMPT":
+        monkeypatch.setenv("FASTGEN_STEPS_PROMPT", "short")
+    monkeypatch.setenv(env_name, "x" * 9)
+
+    with pytest.raises(Exception, match=f"{env_name} must be no longer than 8 chars"):
+        spec.loader.exec_module(module)
+
+
 def test_steps_benchmark_rejects_invalid_step_values(tmp_path, monkeypatch):
     import importlib.util
 

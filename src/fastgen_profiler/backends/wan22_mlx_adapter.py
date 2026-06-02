@@ -22,6 +22,7 @@ from typing import Any
 
 _VIDEO_POSTPROCESS_ALLOCATION_MULTIPLIER = 6
 _MAX_CONFIG_JSON_BYTES = 1 * 1024 * 1024
+_MAX_PRELOAD_SCAN_FILES = 10_000
 
 
 def _require_non_empty_parameters(component: Any, label: str) -> Any:
@@ -159,17 +160,10 @@ class Wan22MLXPipeline:
 
     def _check_tokenizer_load(self, path: Path, phase: str) -> None:
         if not path.is_dir():
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
+            _raise_runtime_abort(
                 f"cannot scan {path} before loading {phase}; refusing to load tokenizer without host allocation preflight"
             )
-        try:
-            total = sum(file.stat().st_size for file in path.iterdir() if file.is_file())
-        except OSError as exc:
-            from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
-            raise RuntimeMemoryAbort(
-                f"cannot scan {path} before loading {phase}; refusing to load tokenizer without host allocation preflight"
-            ) from exc
+        total = _flat_file_size_total(path, phase)
         if total > 0:
             self._check_host_allocation(total * 4, phase)
 
@@ -840,6 +834,32 @@ def _read_bounded_json_config(path: Path, label: str) -> dict[str, Any]:
             f"Wan2.2 {label} at {path} must be a JSON object; refusing to construct MLX model"
         )
     return config
+
+
+def _flat_file_size_total(path: Path, phase: str) -> int:
+    total = 0
+    scanned = 0
+    try:
+        for entry in path.iterdir():
+            scanned += 1
+            if scanned > _MAX_PRELOAD_SCAN_FILES:
+                _raise_runtime_abort(
+                    f"cannot scan {path} before loading {phase}; file scan exceeded "
+                    f"{_MAX_PRELOAD_SCAN_FILES} files"
+                )
+            if entry.is_file():
+                total += entry.stat().st_size
+    except OSError:
+        _raise_runtime_abort(
+            f"cannot scan {path} before loading {phase}; refusing to load without host allocation preflight"
+        )
+    return total
+
+
+def _raise_runtime_abort(message: str) -> None:
+    from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+    raise RuntimeMemoryAbort(message)
 
 
 def _non_negative_int(value: Any, key: str) -> int:

@@ -35,6 +35,7 @@ from fastgen_profiler.mlx_guard import (
     mlx_cleanup,
     run_counter,
     should_restart_process,
+    DEFAULT_MAX_PROMPT_CHARS,
     MAX_CONSECUTIVE_RUNS,
     COOLDOWN_SECONDS,
 )
@@ -81,6 +82,13 @@ def _env_step_values(name: str, default: str) -> list[int]:
     return [_capped_positive_int_value(name, value, MAX_STEPS) for value in raw_values]
 
 
+def _env_bounded_text(name: str, default: str, *, max_chars: int) -> str:
+    value = os.environ.get(name, default)
+    if len(value) > max_chars:
+        raise MemoryGuardError(f"{name} must be no longer than {max_chars} chars")
+    return value
+
+
 def _capped_positive_int_value(name: str, raw: str, max_value: int) -> int:
     value = _positive_int_value(name, raw)
     if value > max_value:
@@ -107,11 +115,17 @@ OUTPUT_BASE = Path(os.environ.get(
     "FASTGEN_STEPS_OUTPUT_BASE",
     str(REPO_ROOT / "artifacts" / "steps_benchmark"),
 ))
-PROMPT = os.environ.get(
+MAX_PROMPT_CHARS = _env_positive_int("FASTGEN_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
+PROMPT = _env_bounded_text(
     "FASTGEN_STEPS_PROMPT",
     "A golden retriever running through a sunlit meadow, cinematic, slow motion",
+    max_chars=MAX_PROMPT_CHARS,
 )
-NEGATIVE_PROMPT = os.environ.get("FASTGEN_STEPS_NEGATIVE_PROMPT", "")
+NEGATIVE_PROMPT = _env_bounded_text(
+    "FASTGEN_STEPS_NEGATIVE_PROMPT",
+    "",
+    max_chars=MAX_PROMPT_CHARS,
+)
 WIDTH = _env_capped_positive_int("FASTGEN_STEPS_WIDTH", 512, MAX_DIMENSION)
 HEIGHT = _env_capped_positive_int("FASTGEN_STEPS_HEIGHT", 512, MAX_DIMENSION)
 FRAMES = _env_capped_positive_int("FASTGEN_STEPS_FRAMES", 9, MAX_FRAMES)
