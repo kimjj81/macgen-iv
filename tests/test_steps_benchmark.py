@@ -1091,6 +1091,29 @@ def test_steps_benchmark_rejects_oversized_child_result(tmp_path, monkeypatch):
     }
 
 
+def test_steps_benchmark_rejects_unbounded_parent_result_stream(tmp_path, monkeypatch):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = repo_root / "scripts" / "steps_benchmark.py"
+    spec = importlib.util.spec_from_file_location("steps_benchmark_parent_writer_limit_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("FASTGEN_STEPS_OUTPUT_BASE", str(tmp_path / "steps"))
+    spec.loader.exec_module(module)
+
+    def records():
+        while True:
+            yield {"steps": 1, "skipped": True}
+
+    with pytest.raises(module.MemoryGuardError, match="steps result record limit exceeded"):
+        module._write_steps_jsonl(tmp_path / "results.jsonl", records(), max_records=1)
+
+    assert (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines() == [
+        json.dumps({"steps": 1, "skipped": True})
+    ]
+
+
 def test_steps_benchmark_heavy_mode_recovers_between_child_processes(tmp_path, monkeypatch):
     import importlib.util
 

@@ -537,9 +537,20 @@ def _bound_steps_sequence(value: Iterable[Any]) -> list[Any]:
     return bounded
 
 
-def _write_steps_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+def _write_steps_jsonl(
+    path: Path,
+    records: Iterable[dict[str, Any]],
+    *,
+    max_records: int = MAX_STEP_VALUES,
+) -> None:
+    if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records <= 0:
+        raise MemoryGuardError(f"steps result record limit must be a positive integer, got {max_records!r}")
     with open(path, "w", encoding="utf-8") as f:
-        for record in records:
+        for index, record in enumerate(records):
+            if index >= max_records:
+                raise MemoryGuardError(
+                    f"steps result record limit exceeded: more than {max_records} records"
+                )
             f.write(json.dumps(_bound_steps_result(record)) + "\n")
 
 
