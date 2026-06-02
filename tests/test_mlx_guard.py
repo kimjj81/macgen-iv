@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import types
+import weakref
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -6386,6 +6387,36 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         assert cleanup_calls == ["cleanup"]
 
+    def test_ltx23_cleanup_clears_traceback_locals_before_mlx_cleanup(self, monkeypatch):
+        import gc
+        from fastgen_profiler.backends import ltx23_mlx_adapter
+
+        class HeavyLocal:
+            pass
+
+        def make_exception():
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            try:
+                raise RuntimeError("runtime failed while heavy local was alive")
+            except RuntimeError as exc:
+                return exc, ref
+
+        exc, ref = make_exception()
+        assert ref() is not None
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+
+        ltx23_mlx_adapter._cleanup_loaded_runtime_after_error(exc)
+
+        assert cleanup_calls == ["cleanup"]
+
     def test_ltx23_decode_runtime_abort_from_upsampled_shape_runs_cleanup(self, tmp_path, monkeypatch):
         from fastgen_profiler.backends.ltx23_mlx_adapter import LTX23MLXPipeline
 
@@ -6737,6 +6768,36 @@ import fastgen_profiler.backends.wan22_mlx_adapter
 
         with pytest.raises(RuntimeError, match="wan vae failed"):
             pipe.decode(FakeLatents())
+
+        assert cleanup_calls == ["cleanup"]
+
+    def test_wan22_cleanup_clears_traceback_locals_before_mlx_cleanup(self, monkeypatch):
+        import gc
+        from fastgen_profiler.backends import wan22_mlx_adapter
+
+        class HeavyLocal:
+            pass
+
+        def make_exception():
+            heavy = HeavyLocal()
+            ref = weakref.ref(heavy)
+            try:
+                raise RuntimeError("runtime failed while heavy local was alive")
+            except RuntimeError as exc:
+                return exc, ref
+
+        exc, ref = make_exception()
+        assert ref() is not None
+        cleanup_calls: list[str] = []
+
+        def cleanup():
+            gc.collect()
+            assert ref() is None
+            cleanup_calls.append("cleanup")
+
+        monkeypatch.setattr("fastgen_profiler.mlx_guard.mlx_cleanup", cleanup)
+
+        wan22_mlx_adapter._cleanup_loaded_runtime_after_error(exc)
 
         assert cleanup_calls == ["cleanup"]
 

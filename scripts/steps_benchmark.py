@@ -341,11 +341,24 @@ def run_single(steps: int):
               f"now_free={cleanup.get('free_after_gb', '?')}GB")
         increment_run_counter()
     except Exception:
+        _clear_exception_traceback_frames(sys.exc_info()[1])
         pipe = latents = video = context = prepared = img = None
         gc.collect()
         raise
 
     return result
+
+
+def _clear_exception_traceback_frames(exc: BaseException | None) -> None:
+    if exc is None:
+        return
+    tb = exc.__traceback__
+    while tb is not None:
+        try:
+            tb.tb_frame.clear()
+        except RuntimeError:
+            pass
+        tb = tb.tb_next
 
 
 def _check_decoded_video_shape(video, *, label: str) -> None:
@@ -459,12 +472,14 @@ def run_child() -> int:
         error = _safe_exception_text(e)
         print(f"  [guard] steps={steps} ABORTED: {error}")
         result = {"steps": steps, "error": error, "aborted": True}
+        _clear_exception_traceback_frames(e)
         result["cleanup"] = mlx_cleanup()
     except Exception as e:
         error = _safe_exception_text(e)
         print(f"  steps={steps} FAILED: {error}")
         print("  [guard] traceback suppressed to avoid unbounded exception formatting")
         result = {"steps": steps, "error": error}
+        _clear_exception_traceback_frames(e)
         result["cleanup"] = mlx_cleanup()
 
     _write_child_result_file(result_path, result)
@@ -810,6 +825,7 @@ def main():
             print(f"  [guard] steps={steps} ABORTED: {error}")
             all_results.append({"steps": steps, "error": error, "aborted": True})
             increment_run_counter()
+            _clear_exception_traceback_frames(e)
             mlx_cleanup()
         except Exception as e:
             error = _safe_exception_text(e)
@@ -819,6 +835,7 @@ def main():
             # Treat unknown failures as a consumed MLX process slot: the error
             # may have happened after Metal state was initialized.
             increment_run_counter()
+            _clear_exception_traceback_frames(e)
             mlx_cleanup()
 
     # Write JSONL

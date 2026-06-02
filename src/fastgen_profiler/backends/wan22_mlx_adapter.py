@@ -1121,12 +1121,23 @@ def _cleanup_loaded_runtime_after_error(exc: BaseException | None = None) -> Non
 
         if isinstance(exc, RuntimeMemoryAbort):
             return
+        _clear_traceback_frames(exc)
     try:
         from fastgen_profiler.mlx_guard import mlx_cleanup
 
         mlx_cleanup()
     except Exception:
         pass
+
+
+def _clear_traceback_frames(exc: BaseException) -> None:
+    tb = exc.__traceback__
+    while tb is not None:
+        try:
+            tb.tb_frame.clear()
+        except RuntimeError:
+            pass
+        tb = tb.tb_next
 
 
 def _positive_int_tuple(
