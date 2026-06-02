@@ -50,6 +50,8 @@ MAX_FRAMES = 257
 MAX_FPS = 240
 MAX_STEPS = 512
 MAX_STEP_VALUES = 16
+MAX_ENV_NUMERIC_CHARS = 64
+MAX_STEP_VALUES_ENV_CHARS = MAX_STEP_VALUES * (MAX_ENV_NUMERIC_CHARS + 1) - 1
 MAX_CHILD_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_SEED = 2**32 - 1
 
@@ -69,6 +71,11 @@ def _env_capped_positive_int(name: str, default: int, max_value: int) -> int:
 
 
 def _positive_int_value(name: str, raw: str) -> int:
+    raw = raw.strip()
+    if len(raw) > MAX_ENV_NUMERIC_CHARS:
+        raise MemoryGuardError(
+            f"{name} must be no longer than {MAX_ENV_NUMERIC_CHARS} chars"
+        )
     try:
         value = int(raw)
     except ValueError as exc:
@@ -79,7 +86,12 @@ def _positive_int_value(name: str, raw: str) -> int:
 
 
 def _env_step_values(name: str, default: str) -> list[int]:
-    raw_values = [value.strip() for value in os.environ.get(name, default).split(",") if value.strip()]
+    raw = os.environ.get(name, default)
+    if len(raw) > MAX_STEP_VALUES_ENV_CHARS:
+        raise MemoryGuardError(
+            f"{name} must be no longer than {MAX_STEP_VALUES_ENV_CHARS} chars"
+        )
+    raw_values = [value.strip() for value in raw.split(",") if value.strip()]
     if len(raw_values) > MAX_STEP_VALUES:
         raise MemoryGuardError(f"{name} may contain at most {MAX_STEP_VALUES} values")
     return [_capped_positive_int_value(name, value, MAX_STEPS) for value in raw_values]

@@ -869,6 +869,24 @@ class TestConfigureMlxResourceLimits:
         assert calls["cache"] == int(0.5 * 1024 ** 3)
         assert calls["wired"] == 10 * 1024 ** 3
 
+    def test_env_override_rejects_oversized_numeric_value_before_float(self, monkeypatch):
+        monkeypatch.setenv("FASTGEN_MLX_MEMORY_LIMIT_GB", "1" * 10_000)
+
+        with pytest.raises(
+            MemoryGuardError,
+            match="FASTGEN_MLX_MEMORY_LIMIT_GB must be no longer than 64 chars",
+        ):
+            configure_mlx_resource_limits(
+                snapshot=SystemSnapshot(
+                    free_bytes=80 * 1024 ** 3,
+                    total_bytes=128 * 1024 ** 3,
+                    pressure=0.2,
+                    swap_files=0,
+                    free_fraction=None,
+                ),
+                label="limits",
+            )
+
     def test_probe_memory_drop_blocks_before_parent_mlx_import(self, monkeypatch):
         sys.modules.pop("mlx.core", None)
         snapshots = [
@@ -1591,6 +1609,15 @@ class TestAllocationBudget:
         monkeypatch.setenv("FASTGEN_MAX_PROMPT_CHARS", "zero")
 
         with pytest.raises(MemoryGuardError, match="FASTGEN_MAX_PROMPT_CHARS"):
+            check_text_prompt_budget(prompt="hello")
+
+    def test_prompt_budget_rejects_oversized_numeric_env_before_int(self, monkeypatch):
+        monkeypatch.setenv("FASTGEN_MAX_PROMPT_CHARS", "1" * 10_000)
+
+        with pytest.raises(
+            MemoryGuardError,
+            match="FASTGEN_MAX_PROMPT_CHARS must be no longer than 64 chars",
+        ):
             check_text_prompt_budget(prompt="hello")
 
     def test_prompt_budget_rejects_unbounded_max_prompt_env(self, monkeypatch):

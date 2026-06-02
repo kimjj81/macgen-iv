@@ -62,6 +62,7 @@ MIN_MLX_MEMORY_LIMIT_BYTES = 512 * 1024 ** 2  # 512 MiB
 DEFAULT_MAX_PROMPT_CHARS = 8192
 MAX_PROMPT_CHARS = 65_536
 MAX_TELEMETRY_OUTPUT_BYTES = 64 * 1024
+MAX_ENV_NUMBER_CHARS = 64
 
 # Adaptive batch sizing defaults.
 ADAPTIVE_INITIAL_FRAMES = 5
@@ -391,6 +392,11 @@ def _env_gb_to_bytes(name: str) -> int | None:
     value = os.environ.get(name)
     if value is None or value.strip() == "":
         return None
+    value = value.strip()
+    if len(value) > MAX_ENV_NUMBER_CHARS:
+        raise MemoryGuardError(
+            f"{name} must be no longer than {MAX_ENV_NUMBER_CHARS} chars"
+        )
     try:
         gb = float(value)
     except ValueError as exc:
@@ -918,6 +924,11 @@ def _max_prompt_chars() -> int:
     raw = os.environ.get("FASTGEN_MAX_PROMPT_CHARS")
     if raw is None or raw.strip() == "":
         return DEFAULT_MAX_PROMPT_CHARS
+    raw = raw.strip()
+    if len(raw) > MAX_ENV_NUMBER_CHARS:
+        raise MemoryGuardError(
+            f"FASTGEN_MAX_PROMPT_CHARS must be no longer than {MAX_ENV_NUMBER_CHARS} chars"
+        )
     try:
         value = int(raw)
     except ValueError as exc:
