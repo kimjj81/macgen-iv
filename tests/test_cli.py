@@ -224,6 +224,51 @@ def test_report_command_produces_markdown_from_jsonl(tmp_path):
     assert "Recommended Next Bottleneck" in report
 
 
+def test_profile_summary_bounds_text_and_ignores_non_finite_metrics():
+    long_error = "failed: " + ("z" * 1_000)
+    records = [
+        {
+            "run_id": "summary-run",
+            "preset": "smoke",
+            "variant_label": "bad|" + ("v" * 1_000),
+            "phase": "total",
+            "seconds": float("inf"),
+            "peak_memory": -1,
+            "error": long_error,
+        },
+        {
+            "run_id": "summary-run",
+            "preset": "smoke",
+            "variant_label": "bad|" + ("v" * 1_000),
+            "phase": "denoise_total",
+            "seconds": float("nan"),
+            "peak_memory": "not-an-int",
+            "error": None,
+        },
+        {
+            "run_id": "summary-run",
+            "preset": "smoke",
+            "variant_label": "bad|" + ("v" * 1_000),
+            "phase": "decode",
+            "seconds": -5,
+            "peak_memory": 2048,
+            "error": None,
+        },
+    ]
+
+    rows = cli_module._profile_summary_rows(records)
+    recommendation = cli_module._profile_recommendation(records)
+
+    assert rows[0]["total"] == 0.0
+    assert rows[0]["denoise_avg"] == 0.0
+    assert rows[0]["peak_memory"] == "2048"
+    assert rows[0]["variant"].startswith("bad/")
+    assert "<truncated>" in rows[0]["variant"]
+    assert "z" * 300 not in recommendation
+    assert "inf" not in recommendation.lower()
+    assert "nan" not in recommendation.lower()
+
+
 def test_profile_command_runs_full_wan_suite_and_writes_comparison_report(tmp_path, capsys):
     results_dir = tmp_path / "profiles"
 

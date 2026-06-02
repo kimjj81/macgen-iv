@@ -41,6 +41,8 @@ DEFAULT_IMPORT_PATHS = {
 }
 
 DEFAULT_ENV_FILE_MAX_BYTES = 1024 * 1024
+DEFAULT_MODEL_DISCOVERY_MAX_DIRS = 100_000
+DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,10 +129,22 @@ def discover_import_dirs(source: str) -> list[Path]:
     return _dedupe_paths(found)
 
 
-def discover_generation_model_dirs(roots: Iterable[Path]) -> list[Path]:
+def discover_generation_model_dirs(
+    roots: Iterable[Path],
+    *,
+    max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
+    max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+) -> list[Path]:
     candidates: list[ModelCandidate] = []
     for model in TARGET_GENERATION_MODELS:
-        candidates.extend(discover_models(roots, model=model))
+        candidates.extend(
+            discover_models(
+                roots,
+                model=model,
+                max_dirs=max_dirs,
+                max_candidates=max_candidates,
+            )
+        )
     return _dedupe_paths(candidate.path for candidate in candidates)
 
 
@@ -172,12 +186,29 @@ def replace_model_dirs_in_env(
     return replacement
 
 
-def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[ModelCandidate]:
+def discover_models(
+    roots: Iterable[Path],
+    *,
+    model: str | None = None,
+    max_dirs: int = DEFAULT_MODEL_DISCOVERY_MAX_DIRS,
+    max_candidates: int = DEFAULT_MODEL_DISCOVERY_MAX_CANDIDATES,
+) -> list[ModelCandidate]:
+    if max_dirs <= 0:
+        raise ValueError("model discovery directory limit must be positive")
+    if max_candidates <= 0:
+        raise ValueError("model discovery candidate limit must be positive")
     candidates: list[ModelCandidate] = []
+    visited_dirs = 0
     for root in _dedupe_paths(roots):
         if not root.exists() or not root.is_dir():
             continue
         for path in _walk_dirs(root):
+            visited_dirs += 1
+            if visited_dirs > max_dirs:
+                raise ValueError(
+                    f"model discovery visited more than {max_dirs} directories; "
+                    "narrow --model-dir or import source"
+                )
             markers = _markers(path)
             if not markers:
                 continue
@@ -193,6 +224,7 @@ def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[
                 candidates.append(candidate)
             elif _is_generation_model_candidate(candidate, model=model):
                 candidates.append(candidate)
+            _check_candidate_limit(candidates, max_candidates=max_candidates)
 
         # DrawThings-style flat directory: individual model files in a single dir.
         # When a directory contains .ckpt/.safetensors files that match the target
@@ -202,6 +234,7 @@ def discover_models(roots: Iterable[Path], *, model: str | None = None) -> list[
             for file_candidate in _discover_flat_model_files(root, model=model):
                 if file_candidate not in candidates:
                     candidates.append(file_candidate)
+                    _check_candidate_limit(candidates, max_candidates=max_candidates)
 
     return sorted(candidates, key=lambda item: (item.model_family_guess == "unknown", item.id))
 
@@ -275,7 +308,19 @@ def _walk_dirs(root: Path) -> Iterable[Path]:
         yield Path(current)
 
 
-def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate]:
+def _check_candidate_limit(
+    candidates: list[ModelCandidate],
+    *,
+    max_candidates: int,
+) -> None:
+    if len(candidates) > max_candidates:
+        raise ValueError(
+            f"model discovery found more than {max_candidates} candidates; "
+            "narrow --model-dir or import source"
+        )
+
+
+def _discover_flat_model_files(root: Path, *, model: str) -> Iterable[ModelCandidate]:
     """Find individual model files in a flat directory (DrawThings-style).
 
     When all model weights live as .ckpt/.safetensors/.gguf files in one
@@ -283,11 +328,10 @@ def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate
     won't match because the directory name has no model family info.
     Instead, create one candidate per matching file.
     """
-    candidates: list[ModelCandidate] = []
     try:
         entries = root.iterdir()
     except OSError:
-        return []
+        return
 
     model_suffixes = {".ckpt", ".safetensors", ".gguf", ".mlx"}
     for entry in entries:
@@ -306,8 +350,7 @@ def _discover_flat_model_files(root: Path, *, model: str) -> list[ModelCandidate
             model_family_guess=family,
             markers=(f"*{entry.suffix.lower()}",),
         )
-        candidates.append(candidate)
-    return candidates
+        yield candidate
 
 
 def _markers(path: Path) -> tuple[str, ...]:

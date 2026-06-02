@@ -73,9 +73,14 @@ Result/report readers must also remain bounded. JSONL benchmark result files
 may be appended over many runs, so report generation must reject input files
 above a fixed byte limit and stop before accumulating an excessive number of
 records in host memory.
+Report and CLI summary rendering must avoid propagating non-finite timings or
+unbounded text fields from malformed records into generated output.
 User-selected configuration files such as `--env-file` must also be capped
 before parsing or preservation rewrites, because model discovery and import can
 run before any MLX-specific guard is active.
+Model discovery must also cap directory traversal and candidate accumulation.
+Users can point `--model-dir` or import sources at very large directory trees,
+and discovery runs before any MLX-specific guard is active.
 Video postprocess and frame export preflights must reserve more than the input
 frame buffer because lower-level encoders and image writers may allocate
 contiguous, converted, or temporary buffers outside MLX allocator counters.

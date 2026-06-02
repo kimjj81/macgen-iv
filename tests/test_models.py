@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import fastgen_profiler.models as models_module
 from fastgen_profiler.models import (
     discover_generation_model_dirs,
     discover_import_dirs,
@@ -36,6 +37,30 @@ def test_model_discovery_does_not_materialize_entire_directory_list():
             offenders.append(node.lineno)
 
     assert offenders == []
+
+
+def test_model_discovery_rejects_excessive_directory_traversal(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    walked = [root / "wan-one", root / "wan-two"]
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
+    monkeypatch.setattr(models_module, "_markers", lambda path: ())
+
+    with pytest.raises(ValueError, match="visited more than 1 directories"):
+        discover_models([root], model="wan2.2", max_dirs=1)
+
+
+def test_model_discovery_rejects_excessive_candidate_accumulation(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    walked = [root / "wan-one", root / "wan-two"]
+
+    monkeypatch.setattr(models_module, "_walk_dirs", lambda path: iter(walked))
+    monkeypatch.setattr(models_module, "_markers", lambda path: ("config.json",))
+
+    with pytest.raises(ValueError, match="found more than 1 candidates"):
+        discover_models([root], model="wan2.2", max_candidates=1)
 
 
 def test_discovers_hugging_face_snapshot_and_draw_things_style_models(tmp_path):

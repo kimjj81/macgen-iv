@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import math
 from pathlib import Path
 import sys
 import time
@@ -67,6 +68,7 @@ COMPILE_CHOICES = ("off", "on")
 
 DEFAULT_GUIDANCE = 3.5
 DEFAULT_FPS = 12
+MAX_SUMMARY_FIELD_CHARS = 256
 
 app = typer.Typer(
     help="Profile MLX video generation experiments and write benchmark JSONL.",
@@ -1378,10 +1380,10 @@ def _profile_summary_rows(records: list[dict]) -> list[dict]:
         status = "skipped" if any(error.startswith("skipped:") for error in errors) else ("failed" if errors else "ok")
         rows.append(
             {
-                "preset": first.get("preset") or "manual",
-                "variant": first.get("variant_label") or "manual",
+                "preset": _summary_text(first.get("preset") or "manual"),
+                "variant": _summary_text(first.get("variant_label") or "manual"),
                 "total": _sum_phase(run_records, "total"),
-                "slowest_phase": _slowest_recorded_phase(run_records)[0],
+                "slowest_phase": _summary_text(_slowest_recorded_phase(run_records)[0]),
                 "denoise_avg": _average_phase(run_records, "denoise_step"),
                 "peak_memory": _format_summary_memory(_max_memory(run_records)),
                 "status": status,
@@ -1391,14 +1393,18 @@ def _profile_summary_rows(records: list[dict]) -> list[dict]:
 
 
 def _profile_recommendation(records: list[dict]) -> str:
-    errors = [str(record["error"]) for record in records if record.get("error") and not str(record["error"]).startswith("skipped:")]
+    errors = [
+        _summary_text(record["error"])
+        for record in records
+        if record.get("error") and not str(record["error"]).startswith("skipped:")
+    ]
     if errors:
         return f"fix failed run first: {errors[0]}"
     phase_totals: dict[str, float] = {}
     total = 0.0
     for record in records:
-        phase = str(record["phase"])
-        seconds = float(record["seconds"])
+        phase = _summary_text(record["phase"])
+        seconds = _finite_record_seconds(record)
         if phase == "total":
             total += seconds
         elif phase != "denoise_step":
@@ -1412,11 +1418,11 @@ def _profile_recommendation(records: list[dict]) -> str:
 
 
 def _sum_phase(records: list[dict], phase: str) -> float:
-    return sum(float(record["seconds"]) for record in records if record["phase"] == phase)
+    return sum(_finite_record_seconds(record) for record in records if record["phase"] == phase)
 
 
 def _average_phase(records: list[dict], phase: str) -> float:
-    values = [float(record["seconds"]) for record in records if record["phase"] == phase]
+    values = [_finite_record_seconds(record) for record in records if record["phase"] == phase]
     if not values:
         return 0.0
     return sum(values) / len(values)
@@ -1425,22 +1431,56 @@ def _average_phase(records: list[dict], phase: str) -> float:
 def _slowest_recorded_phase(records: list[dict]) -> tuple[str, float]:
     phases: dict[str, float] = {}
     for record in records:
-        phase = str(record["phase"])
+        phase = _summary_text(record["phase"])
         if phase in {"total", "denoise_step"}:
             continue
-        phases[phase] = phases.get(phase, 0.0) + float(record["seconds"])
+        phases[phase] = phases.get(phase, 0.0) + _finite_record_seconds(record)
     if not phases:
         return ("none", 0.0)
     return max(phases.items(), key=lambda item: item[1])
 
 
 def _max_memory(records: list[dict]) -> int | None:
-    values = [int(record["peak_memory"]) for record in records if record.get("peak_memory") is not None]
+    values = [
+        value
+        for value in (_non_negative_record_int(record, "peak_memory") for record in records)
+        if value is not None
+    ]
     return max(values) if values else None
 
 
 def _format_summary_memory(value: int | None) -> str:
     return "unavailable" if value is None else str(value)
+
+
+def _finite_record_seconds(record: dict) -> float:
+    try:
+        value = float(record["seconds"])
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return value
+
+
+def _non_negative_record_int(record: dict, key: str) -> int | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        return None
+    if converted < 0:
+        return None
+    return converted
+
+
+def _summary_text(value: object) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
+    if len(text) <= MAX_SUMMARY_FIELD_CHARS:
+        return text
+    return f"{text[: MAX_SUMMARY_FIELD_CHARS - 12]}...<truncated>"
 
 
 def _select_model_candidate(options: RunOptions) -> ModelCandidate | None:

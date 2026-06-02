@@ -7,6 +7,7 @@ import sys
 from fastgen_profiler.backends import create_backend
 from fastgen_profiler.metrics import REQUIRED_PHASES, RunConfig, machine_metadata, read_jsonl
 from fastgen_profiler.profiler import Profiler
+from fastgen_profiler.reports.markdown import render_markdown_report
 
 
 REQUIRED_FIELDS = {
@@ -123,3 +124,52 @@ def test_read_jsonl_rejects_more_records_than_limit(tmp_path):
         assert "exceeds JSONL record limit" in str(exc)
     else:
         raise AssertionError("read_jsonl should reject excessive record counts")
+
+
+def test_markdown_report_bounds_text_and_ignores_non_finite_metrics():
+    long_error = "failed: " + ("x" * 1_000)
+    records = [
+        {
+            "run_id": "run|bad\nid",
+            "preset": "manual",
+            "variant_label": "variant|" + ("y" * 1_000),
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "total",
+            "seconds": float("inf"),
+            "peak_memory": -1,
+            "error": long_error,
+        },
+        {
+            "run_id": "run|bad\nid",
+            "preset": "manual",
+            "variant_label": "variant|" + ("y" * 1_000),
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "denoise_total",
+            "seconds": float("nan"),
+            "peak_memory": "not-an-int",
+            "error": long_error,
+        },
+        {
+            "run_id": "run|bad\nid",
+            "preset": "manual",
+            "variant_label": "variant|" + ("y" * 1_000),
+            "model": "wan2.2",
+            "backend": "stub",
+            "phase": "decode",
+            "seconds": -5,
+            "peak_memory": 1024,
+            "error": long_error,
+        },
+    ]
+
+    report = render_markdown_report(records)
+
+    assert "inf" not in report.lower()
+    assert "nan" not in report.lower()
+    assert "run/bad id" in report
+    assert "variant/" in report
+    assert "<truncated>" in report
+    assert "1024 bytes" in report
+    assert "x" * 300 not in report

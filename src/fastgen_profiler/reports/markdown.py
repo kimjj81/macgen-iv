@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 from typing import Any
+
+
+MAX_REPORT_FIELD_CHARS = 256
 
 
 def render_markdown_report(records: list[dict[str, Any]]) -> str:
@@ -26,9 +30,9 @@ def render_markdown_report(records: list[dict[str, Any]]) -> str:
         total = _phase_seconds(run_records, "total")
         status = _status(run_records)
         lines.append(
-            f"| `{run_id}` | `{first.get('preset') or 'manual'}` | "
-            f"`{first.get('variant_label') or 'manual'}` | `{first['model']}` | "
-            f"`{first['backend']}` | {total:.6f} | {status} |"
+            f"| `{_report_text(run_id)}` | `{_report_text(first.get('preset') or 'manual')}` | "
+            f"`{_report_text(first.get('variant_label') or 'manual')}` | `{_report_text(first['model'])}` | "
+            f"`{_report_text(first['backend'])}` | {total:.6f} | {status} |"
         )
 
     lines.extend(["", "## Preset Comparison", ""])
@@ -36,9 +40,9 @@ def render_markdown_report(records: list[dict[str, Any]]) -> str:
 
     lines.extend(["", "## Phase Time Breakdown", ""])
     for run_id, run_records in runs.items():
-        lines.extend([f"### `{run_id}`", "", "| phase | seconds |", "| --- | ---: |"])
+        lines.extend([f"### `{_report_text(run_id)}`", "", "| phase | seconds |", "| --- | ---: |"])
         for phase, seconds in _phase_breakdown(run_records):
-            lines.append(f"| `{phase}` | {seconds:.6f} |")
+            lines.append(f"| `{_report_text(phase)}` | {seconds:.6f} |")
         average_step = _average_denoise_step(run_records)
         slowest_phase = _slowest_phase(run_records)
         peak_memory = _peak_memory(run_records)
@@ -65,14 +69,14 @@ def render_markdown_report(records: list[dict[str, Any]]) -> str:
     lines.extend(["## Skipped Runs", ""])
     if skipped_runs:
         for run_id, errors in skipped_runs:
-            lines.append(f"- `{run_id}`: {errors[0]}")
+            lines.append(f"- `{_report_text(run_id)}`: {_report_text(errors[0])}")
     else:
         lines.append("No skipped runs.")
 
     lines.extend(["## Failed Runs", ""])
     if failed_runs:
         for run_id, errors in failed_runs:
-            lines.append(f"- `{run_id}`: {errors[0]}")
+            lines.append(f"- `{_report_text(run_id)}`: {_report_text(errors[0])}")
     else:
         lines.append("No failed runs.")
 
@@ -89,7 +93,7 @@ def _group_by_run(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 
 
 def _phase_seconds(records: list[dict[str, Any]], phase: str) -> float:
-    return sum(float(record["seconds"]) for record in records if record["phase"] == phase)
+    return sum(_finite_seconds(record) for record in records if record["phase"] == phase)
 
 
 def _phase_breakdown(records: list[dict[str, Any]]) -> list[tuple[str, float]]:
@@ -97,7 +101,7 @@ def _phase_breakdown(records: list[dict[str, Any]]) -> list[tuple[str, float]]:
     for record in records:
         if record["phase"] == "denoise_step":
             continue
-        phases[str(record["phase"])] += float(record["seconds"])
+        phases[_report_text(record["phase"])] += _finite_seconds(record)
     return sorted(phases.items(), key=lambda item: item[0])
 
 
@@ -110,18 +114,18 @@ def _preset_comparison_lines(runs: dict[str, list[dict[str, Any]]]) -> list[str]
         first = run_records[0]
         slowest_phase = _slowest_phase(run_records)
         lines.append(
-            f"| `{first.get('preset') or 'manual'}` | `{first.get('variant_label') or 'manual'}` | "
+            f"| `{_report_text(first.get('preset') or 'manual')}` | `{_report_text(first.get('variant_label') or 'manual')}` | "
             f"{_phase_seconds(run_records, 'total'):.6f} | "
             f"{_phase_seconds(run_records, 'denoise_total'):.6f} | "
             f"{_average_denoise_step(run_records):.6f} | "
-            f"`{slowest_phase[0]}` | `{_format_memory(_peak_memory(run_records))}` | "
+            f"`{_report_text(slowest_phase[0])}` | `{_format_memory(_peak_memory(run_records))}` | "
             f"{_status(run_records)} |"
         )
     return lines
 
 
 def _average_denoise_step(records: list[dict[str, Any]]) -> float:
-    steps = [float(record["seconds"]) for record in records if record["phase"] == "denoise_step"]
+    steps = [_finite_seconds(record) for record in records if record["phase"] == "denoise_step"]
     if not steps:
         return 0.0
     return sum(steps) / len(steps)
@@ -135,18 +139,20 @@ def _slowest_phase(records: list[dict[str, Any]]) -> tuple[str, float]:
 
 
 def _peak_memory(records: list[dict[str, Any]]) -> int | None:
-    values = [record["peak_memory"] for record in records if record.get("peak_memory") is not None]
+    values = [_non_negative_int(record["peak_memory"]) for record in records if record.get("peak_memory") is not None]
+    values = [value for value in values if value is not None]
     if not values:
         return None
-    return max(int(value) for value in values)
+    return max(values)
 
 
 def _errors(records: list[dict[str, Any]]) -> list[str]:
     seen: list[str] = []
     for record in records:
         error = record.get("error")
-        if error and error not in seen:
-            seen.append(str(error))
+        sanitized_error = _report_text(error) if error else ""
+        if sanitized_error and sanitized_error not in seen:
+            seen.append(sanitized_error)
     return seen
 
 
@@ -165,7 +171,7 @@ def _recommendation(runs: dict[str, list[dict[str, Any]]]) -> str:
             continue
         errors = _errors(records)
         if errors:
-            return f"Fix failed run `{run_id}` first: {errors[0]}"
+            return f"Fix failed run `{_report_text(run_id)}` first: {_report_text(errors[0])}"
 
     phase_totals: dict[str, float] = defaultdict(float)
     denoise_total = 0.0
@@ -184,10 +190,37 @@ def _recommendation(runs: dict[str, list[dict[str, Any]]]) -> str:
     if total_time > 0 and phase == "denoise_total":
         share = denoise_total / total_time * 100.0
         return f"Inspect `denoise_total` first; it accounts for {share:.1f}% of recorded total time."
-    return f"Inspect `{phase}` first; it is the slowest recorded non-total phase at {seconds:.6f} seconds."
+    return f"Inspect `{_report_text(phase)}` first; it is the slowest recorded non-total phase at {seconds:.6f} seconds."
 
 
 def _format_memory(value: int | None) -> str:
     if value is None:
         return "unavailable"
     return f"{value} bytes"
+
+
+def _finite_seconds(record: dict[str, Any]) -> float:
+    try:
+        value = float(record["seconds"])
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return value
+
+
+def _non_negative_int(value: Any) -> int | None:
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        return None
+    if converted < 0:
+        return None
+    return converted
+
+
+def _report_text(value: Any) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ").replace("|", "/")
+    if len(text) <= MAX_REPORT_FIELD_CHARS:
+        return text
+    return f"{text[: MAX_REPORT_FIELD_CHARS - 12]}...<truncated>"
