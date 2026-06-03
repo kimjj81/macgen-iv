@@ -225,6 +225,7 @@ class MLXBackend(BackendAdapter):
                 steps=config.steps,
                 guidance=config.guidance,
                 cache=config.cache or "none",
+                cfg_steps=getattr(config, "cfg_steps", 0),
             )
             denoise_total_seconds = perf_counter() - denoise_started
             records.append(

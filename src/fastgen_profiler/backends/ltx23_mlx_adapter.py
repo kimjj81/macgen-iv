@@ -109,7 +109,7 @@ def _add_parameter_name(result: set[str], name: str, *, label: str) -> None:
 class LTX23MLXPipeline:
     """Pipeline object implementing the macgen-profile LTX2.3 phase contract."""
 
-    _MAX_CONFIG_DIMENSION = 65_536
+    _MAX_CONFIG_DIMENSION = 300_000
 
     def __init__(
         self,
@@ -528,7 +528,7 @@ class LTX23MLXPipeline:
         tokens = tokenizer(prompt, return_tensors="np")
         input_ids = tokens["input_ids"][0]
         max_tokens = _positive_structural_int(
-            text_config["max_position_embeddings"],
+            text_config.get("max_position_embeddings", 8192),
             "max_position_embeddings",
         )
         hidden_size = _positive_structural_int(text_config["hidden_size"], "hidden_size")
@@ -798,7 +798,7 @@ class LTX23MLXPipeline:
         tokens = tokenizer(prompt, return_tensors="np")
         input_ids = tokens["input_ids"][0]
         max_tokens = _positive_structural_int(
-            text_config["max_position_embeddings"],
+            text_config.get("max_position_embeddings", 8192),
             "max_position_embeddings",
         )
         hidden_size = _positive_structural_int(text_config["hidden_size"], "hidden_size")
@@ -832,9 +832,9 @@ class LTX23MLXPipeline:
                 rope_theta=text_config["rope_theta"],
                 rope_local_base_freq=text_config.get("rope_local_base_freq", 10000),
                 query_pre_attn_scalar=text_config["query_pre_attn_scalar"],
-                sliding_window=text_config["sliding_window"],
-                sliding_window_pattern=text_config["sliding_window_pattern"],
-                max_position_embeddings=text_config["max_position_embeddings"],
+                sliding_window=text_config.get("sliding_window", 1024),
+                sliding_window_pattern=text_config.get("sliding_window_pattern", 1),
+                max_position_embeddings=text_config.get("max_position_embeddings", 8192),
                 rope_scaling=text_config.get("rope_scaling"),
             )
 

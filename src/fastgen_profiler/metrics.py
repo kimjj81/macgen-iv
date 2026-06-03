@@ -65,6 +65,7 @@ class RunConfig:
     result_jsonl: Path
     save_video: bool
     dry_run: bool
+    cfg_steps: int = 0  # 0 = apply CFG on all steps (default behavior)
     profile_id: str | None = None
     profile_name: str | None = None
     preset: str | None = None

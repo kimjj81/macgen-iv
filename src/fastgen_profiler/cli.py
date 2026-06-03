@@ -113,6 +113,7 @@ class PresetRun:
     cache: str
     compile: str
     save_video: bool
+    cfg_steps: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +144,7 @@ class RunOptions:
     quant: str | None
     cache: str | None
     compile: str | None
+    cfg_steps: int | None
     output_dir: Path
     result_jsonl: Path
     save_video: bool | None
@@ -193,6 +195,7 @@ def run(
     quant: Annotated[str | None, typer.Option("--quant", case_sensitive=False)] = None,
     cache: Annotated[str | None, typer.Option("--cache", case_sensitive=False)] = None,
     compile: Annotated[str | None, typer.Option("--compile", case_sensitive=False)] = None,
+    cfg_steps: Annotated[int | None, typer.Option("--cfg-steps", help="Apply CFG only on first N steps (0=all steps)")]= None,
     output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
     result_jsonl: Annotated[Path | None, typer.Option("--result-jsonl")] = None,
     save_video: Annotated[bool | None, typer.Option("--save-video/--no-save-video")] = None,
@@ -218,6 +221,7 @@ def run(
         quant=quant,
         cache=cache,
         compile=compile,
+        cfg_steps=cfg_steps,
         output_dir=output_dir,
         result_jsonl=result_jsonl,
         save_video=save_video,
@@ -242,6 +246,7 @@ def profile(
     quant: Annotated[str | None, typer.Option("--quant", case_sensitive=False)] = None,
     cache: Annotated[str | None, typer.Option("--cache", case_sensitive=False)] = None,
     compile: Annotated[str | None, typer.Option("--compile", case_sensitive=False)] = None,
+    cfg_steps: Annotated[int | None, typer.Option("--cfg-steps", help="Apply CFG only on first N steps (0=all steps)")]= None,
     output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
     results_dir: Annotated[Path, typer.Option("--results-dir")] = Path("artifacts/profiles"),
     result_jsonl: Annotated[Path | None, typer.Option("--result-jsonl")] = None,
@@ -262,6 +267,7 @@ def profile(
         quant=quant,
         cache=cache,
         compile=compile,
+        cfg_steps=cfg_steps,
         output_dir=output_dir,
         results_dir=results_dir,
         result_jsonl=result_jsonl,
@@ -371,6 +377,7 @@ def run_command(options: RunOptions) -> int:
             result_jsonl=options.result_jsonl,
             save_video=preset_run.save_video,
             dry_run=options.dry_run,
+            cfg_steps=preset_run.cfg_steps,
             preset=preset,
             variant_label=_variant_label(preset, preset_run) if preset else "manual",
         )
@@ -1034,6 +1041,7 @@ def _complete_run_options(
     quant: str | None,
     cache: str | None,
     compile: str | None,
+    cfg_steps: int | None,
     output_dir: Path | None,
     result_jsonl: Path | None,
     save_video: bool | None,
@@ -1096,6 +1104,7 @@ def _complete_run_options(
         quant=quant,
         cache=cache,
         compile=compile,
+        cfg_steps=cfg_steps,
         output_dir=output_dir,
         result_jsonl=result_jsonl,
         save_video=save_video,
@@ -1119,6 +1128,7 @@ def _complete_profile_options(
     quant: str | None,
     cache: str | None,
     compile: str | None,
+    cfg_steps: int | None,
     output_dir: Path | None,
     results_dir: Path,
     result_jsonl: Path | None,
@@ -1175,6 +1185,7 @@ def _complete_profile_options(
         quant=quant,
         cache=cache,
         compile=compile,
+        cfg_steps=cfg_steps,
         output_dir=output_dir,
         result_jsonl=result_jsonl,
         save_video=None,
@@ -1272,6 +1283,7 @@ def interactive_run_profile() -> int:
         quant=None,
         cache=None,
         compile=None,
+        cfg_steps=None,
         output_dir=None,
         result_jsonl=None,
         save_video=None,
@@ -1340,6 +1352,7 @@ def _manual_run(options: RunOptions) -> PresetRun:
             quant=options.quant,
             cache=options.cache,
             compile=options.compile,
+            cfg_steps=options.cfg_steps or 0,
             save_video=options.save_video,
         )
     )
@@ -1554,6 +1567,7 @@ def _profile_run_config(
         result_jsonl=options.result_jsonl,
         save_video=spec.run.save_video,
         dry_run=options.dry_run,
+        cfg_steps=spec.run.cfg_steps,
         profile_id=profile_id,
         profile_name=profile_name,
         preset=spec.preset,
@@ -1918,6 +1932,7 @@ def _append_model_selection_error(options: RunOptions, preset_runs: list[PresetR
             result_jsonl=options.result_jsonl,
             save_video=preset_run.save_video,
             dry_run=options.dry_run,
+            cfg_steps=preset_run.cfg_steps,
         )
         append_jsonl(
             options.result_jsonl,

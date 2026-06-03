@@ -747,8 +747,12 @@ class Wan22MLXPipeline:
         if abort is not None:
             raise abort
 
-    def denoise_all(self, latents: Any, *, steps: int, guidance: float, cache: str) -> Any:
-        """Run the full denoise loop with compiled model forward for faster steps."""
+    def denoise_all(self, latents: Any, *, steps: int, guidance: float, cache: str, cfg_steps: int = 0) -> Any:
+        """Run the full denoise loop with compiled model forward for faster steps.
+
+        cfg_steps: apply CFG (B=2) only on the first N steps; rest use B=1.
+                   0 means CFG on all steps (default).
+        """
         self._fail_if_runtime_failed("denoise_all")
         if self.mx is None or self.model is None or self.scheduler is None or self.config is None:
             raise RuntimeError("denoise_all called before load_model")
@@ -761,7 +765,6 @@ class Wan22MLXPipeline:
 
         mx = self.mx
         scheduler = self.scheduler
-        context = self.context_cond if self.cfg_disabled else self.context_cfg
         seq_len = self.seq_len
         cfg_disabled = self.cfg_disabled
         timestep_list = scheduler.timesteps.tolist()
@@ -769,9 +772,32 @@ class Wan22MLXPipeline:
         # Use compiled model forward (set during load_model)
         _call = getattr(self.model, "_compiled", self.model)
 
+        # Interval CFG: prepare B=1 resources if we'll switch mid-loop.
+        # 0 means "all steps get CFG" (standard B=2 pass for every step).
+        effective_cfg_steps = cfg_steps if cfg_steps > 0 else steps
+        use_interval = (not cfg_disabled) and (effective_cfg_steps < steps)
+
+        if use_interval:
+            # We need both B=2 and B=1 cross_kv.
+            # context_cfg is [cond, uncond] concatenated; context_cond is [cond].
+            cross_kv_b2 = self.cross_kv
+            context_cfg = self.context_cfg
+            context_cond = context_cfg[0:1]
+            cross_kv_b1 = self.model.prepare_cross_kv(context_cond)
+            mx.eval(cross_kv_b1)
+
+            # Warmup B=1 path so the compiled trace is ready
+            _call(
+                [latents], t=mx.array([timestep_list[0]]),
+                context=context_cond, seq_len=seq_len,
+                cross_kv_caches=cross_kv_b1, rope_cos_sin=self.rope_cos_sin,
+            )
+
         for i in range(steps):
             timestep_val = timestep_list[i]
             if cfg_disabled:
+                # guidance <= 1.0: unconditional-only B=1 pass
+                context = self.context_cond
                 t_batch = mx.array([timestep_val])
                 preds = _call(
                     [latents], t=t_batch, context=context,
@@ -779,7 +805,18 @@ class Wan22MLXPipeline:
                     rope_cos_sin=self.rope_cos_sin,
                 )
                 noise_pred = preds[0]
+            elif use_interval and i >= effective_cfg_steps:
+                # Past CFG window: B=1 conditional-only pass
+                t_batch = mx.array([timestep_val])
+                preds = _call(
+                    [latents], t=t_batch, context=context_cond,
+                    seq_len=seq_len, cross_kv_caches=cross_kv_b1,
+                    rope_cos_sin=self.rope_cos_sin,
+                )
+                noise_pred = preds[0]
             else:
+                # Standard CFG: B=2 pass
+                context = self.context_cfg
                 t_batch = mx.array([timestep_val, timestep_val])
                 preds = _call(
                     [latents, latents], t=t_batch, context=context,
