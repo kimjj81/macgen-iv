@@ -1,0 +1,44 @@
+===============================================================================================
+Wan2.2-TI2V-5B Realism Parameter Tuning — M4 Ultra 128GB
+===============================================================================================
+
+문제: 기본 설정(g=5.0, "cinematic, 4K" 프롬프트)이 과도하게 매끄러운(뽀샤시) 결과를 생성
+
+해결: guidance 3.5 + 리얼리즘 프롬프트 + negative prompt에 "airbrushed, plastic" 추가
+
+== 변형 비교 (832x480, 41 frames, 40 steps, seed=42) ==
+
+설정                    Total   Denoise  AvgStep   VAE     영상 크기  평가
+g=5.0 cinematic         145.1s  119.2s   2980ms   21.4s   2.1MB     과도 매끄러움
+g=3.5 natural prompt    145.6s  119.7s   2993ms   21.5s   2.6MB     자연스러움 ✓
+g=4.0 natural prompt    179.1s  150.7s   3768ms   23.8s   2.6MB     중간
+g=3.5 seed=12345        196.4s  168.3s   4208ms   23.4s   3.0MB     자연스러움 (다른 시드)
+g=3.5 beach prompt      145.0s  119.0s   2976ms   21.4s   2.6MB     최적 ✓✓
+
+== 추천 벤치마크 설정 ==
+
+해상도: 832x480 (Wan2.2 native 480p)
+프레임: 41 (4n+1, 1.7초 @ 24fps)
+FPS: 24
+Steps: 40 (모델 기본값)
+Guidance: 3.5 (CFG)
+Shift: 5.0 (기본값, 어댑터에 파라미터 추가 전까지 고정)
+
+프롬프트 (리얼리즘):
+"A golden retriever trots along a wet sandy beach, shallow waves washing over its paws.
+The camera tracks alongside in a smooth lateral dolly shot. Warm sunset backlight creates
+golden rim light on the dog's fur. Sea spray catches the light. Natural fur texture,
+documentary style, handheld camera feel, film grain."
+
+네거티브 프롬프트:
+"airbrushed, smooth, plastic, CGI, oversaturated, HDR, overprocessed, beauty filter,
+soft focus, vaseline lens, cartoon, anime, painting"
+
+== 파일 위치 ==
+artifacts/mlx_wan22_quality/          g=5.0 기준 (2.1MB)
+artifacts/mlx_wan22_realism_d/        g=3.5 최적 (2.6MB) ← 추천
+
+== 속도 분석 ==
+- guidance 3.5 vs 5.0: denoise 속도 동일 (~2980ms/step)
+- guidance 4.0에서 급격히 느려짐 (3768ms): MLX 내부 스케줄링 영향 추정
+- VAE decode는 guidance와 무관 (~21-23s)
