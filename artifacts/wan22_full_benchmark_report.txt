@@ -1,0 +1,65 @@
+===============================================================================================
+Wan2.2-TI2V-5B MLX Benchmark — M4 Ultra 128GB
+===============================================================================================
+
+== Quality Benchmark (실제 사용 가능한 영상 품질) ==
+설정: 832x480, 41 frames (1.7s @ 24fps), guidance 5.0, CFG enabled
+프롬프트: 80단어 cinematic golden retriever beach dolly shot
+네거티브 프롬프트: 표준 Wan2.2 negative
+
+Steps |   Total |   Load | TextEnc | Denoise | AvgStep |     VAE
+-------------------------------------------------------------------
+   20 |    80.4 |   3.32 |   0.666 |    56.0 |   2799ms |    20.0
+   28 |   114.9 |   3.43 |   0.671 |    89.1 |   3181ms |    21.3
+   32 |   159.9 |   3.39 |   0.692 |   131.9 |   4122ms |    23.4
+   40 |   195.3 |   3.39 |   0.697 |   167.5 |   4188ms |    23.2
+   48 |   224.5 |   3.38 |   0.690 |   196.9 |   4101ms |    23.2
+
+Phase breakdown (steps=40, total=195.3s):
+  model_load               3.39s  (  1.7%)
+  text_encoder             0.70s  (  0.4%)
+  denoise_total          167.51s  ( 85.8%)
+  vae_decode              23.24s  ( 11.9%)
+
+Scaling (base=20):
+  steps=20:    56.0s  ratio=1.00x  expected=1.00x  efficiency=1.000
+  steps=28:    89.1s  ratio=1.59x  expected=1.40x  efficiency=0.880
+  steps=32:   131.9s  ratio=2.36x  expected=1.60x  efficiency=0.679
+  steps=40:   167.5s  ratio=2.99x  expected=2.00x  efficiency=0.668
+  steps=48:   196.9s  ratio=3.52x  expected=2.40x  efficiency=0.682
+
+분석:
+- steps=20~28까지는 근선형. steps=32부터 scaling efficiency 급락
+- 32→48 사이는 거의 선형 (efficiency 0.68 안정화)
+- 20→32 점프가 비선형: MLX 메모리/GPU 스케줄링 오버헤드 추정
+- AvgStep이 2799ms(20) → 4188ms(40): step당 시간이 증가함
+  → 초기 steps는 캐시 효과, 후반 steps는 더 복잡한 noise schedule
+- VAE decode는 일정 (~23s): denoise 결과와 무관
+- Denoise가 85% 차지: 최적화 1순위
+
+== 빠른 테스트 (저해상도, 품질 불량) ==
+설정: 512x512, 9 frames, fps 8, guidance 1.0, no CFG
+
+Steps |   Total | Denoise | AvgStep |    VAE
+-----------------------------------------------
+   20 |   13.52 |    5.22 |   261ms |   4.32
+   28 |   15.67 |    7.24 |   258ms |   4.38
+   32 |   16.87 |    8.40 |   262ms |   4.37
+   40 |   19.14 |   10.59 |   265ms |   4.42
+   48 |   21.74 |   13.10 |   273ms |   4.48
+
+비고: 저해상도+CFG 없음 → 인식 불가능한 영상. 벤치마크 용도로만 참고.
+
+== 품질 샘플 ==
+artifacts/mlx_wan22_quality/91175a...mp4
+  832x480, 41 frames, 24fps, 40 steps, guidance 5.0
+  2.1MB, 145초 생성 (3분 15초)
+  결과: 골든 리트리버, 해변, 황금빛 역광 — 사실적이고 인식 가능
+
+== 메모리 ==
+전체 실행에서 swap 0, pressure 5-6%, 패닉 없음
+Memory guard 정상 작동 확인
+
+== LTX-2.3 22b ==
+다운로드 진행 중: ~/.cache/huggingface/hub/ltx23-22b-distilled-source/
+완료 후 변환 + 동일 스텝 벤치마크 예정
