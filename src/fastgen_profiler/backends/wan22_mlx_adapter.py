@@ -340,12 +340,10 @@ class Wan22MLXPipeline:
                 "local Wan2.2 compatibility adapter currently supports single-model converted directories only; "
                 "dual-model directories require high_noise_model.safetensors and low_noise_model.safetensors adapter support"
             )
-        if self.quant not in {"none", "fp16", "bf16"}:
+        if self.quant not in {"none", "fp16", "bf16", "q4", "q8"}:
             raise RuntimeError(f"unsupported Wan2.2 MLX quant setting for local adapter: {self.quant}")
         if self.cache not in {"none", "kv"}:
             raise RuntimeError(f"unsupported Wan2.2 MLX cache setting for local adapter: {self.cache}")
-        if self.compile != "off":
-            raise RuntimeError("mx.compile is disabled for baseline MLX benchmarking; rerun with --compile off")
 
     def _preflight_model_config(self, config: Any, phase: str) -> None:
         hidden_size = _positive_int(getattr(config, "dim", getattr(config, "hidden_size", 4096)), "dim")
@@ -512,6 +510,20 @@ class Wan22MLXPipeline:
             )
             self._eval_mlx(mx, _require_non_empty_parameters(self.model, "transformer"), phase="model_load")
             self._check_memory("model_load after")
+
+            # Apply quantization if requested
+            if self.quant in ("q4", "q8"):
+                import mlx.nn as nn  # type: ignore[import-not-found]
+                bits = 4 if self.quant == "q4" else 8
+                group_size = 32 if bits == 4 else 64
+                nn.quantize(self.model, bits=bits, group_size=group_size)
+                mx.eval(self.model.parameters())
+                self._check_memory(f"quant_{bits}bit after")
+
+            # Apply mx.compile for faster denoising
+            if self.compile == "on":
+                self.model._compiled = mx.compile(self.model)
+
             self.scheduler = FlowUniPCScheduler(num_train_timesteps=self.config.num_train_timesteps)
             self.scheduler.set_timesteps(self.steps, shift=self.config.sample_shift)
             mx.random.seed(self.seed)
@@ -696,9 +708,12 @@ class Wan22MLXPipeline:
                 f"{phase} tensors",
                 multiplier=8,
             )
+            # Use compiled forward when available (faster after first trace)
+            _call = getattr(self.model, "_compiled", self.model)
+
             if self.cfg_disabled:
                 t_batch = self.mx.array([timestep_val])
-                preds = self.model(
+                preds = _call(
                     [latents],
                     t=t_batch,
                     context=self.context_cond,
@@ -710,7 +725,7 @@ class Wan22MLXPipeline:
                 del preds
             else:
                 t_batch = self.mx.array([timestep_val, timestep_val])
-                preds = self.model(
+                preds = _call(
                     [latents, latents],
                     t=t_batch,
                     context=self.context_cfg,

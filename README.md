@@ -1,47 +1,48 @@
 # macgen-iv
 
-Mac and Apple Silicon focused image/video generation profiling and optimization tooling.
+Mac and Apple Silicon focused image/video generation profiling and benchmark tooling.
 
-The initial target is a reproducible profiler and benchmark harness for MLX-based video generation pipelines. It profiles model execution phase by phase, records benchmark runs as JSONL, and keeps optimization decisions tied to measured bottlenecks.
+## Mission
 
-## Current Scope
+`macgen-iv` exists to make local image and video generation performance measurable before it is optimized. The project is a reproducible Python + MLX profiler for model pipelines such as Wan2.2 and LTX2.3; it is not a new inference engine.
 
-- Python + MLX first.
-- Reproducible benchmark inputs: prompt, seed, resolution, frames, steps, backend, and model.
-- Phase-level and step-level timing.
-- Backend adapters for target model families such as Wan2.2 and LTX2.3.
-- Markdown report generation from structured profiler results.
-
-## Out Of Scope Initially
-
-- Custom inference engine work.
-- Rust or Swift implementations.
-- MLX upstream changes.
-- Performance improvement claims without benchmark evidence.
-- Custom Metal kernels before a specific kernel bottleneck is proven.
-
-## Project Layout
+The profiler keeps the execution path narrow:
 
 ```text
-AGENTS.md
-docs/
-src/fastgen_profiler/
-tests/
-pyproject.toml
+CLI -> profiler -> backend adapter -> model pipeline -> metrics recorder -> report generator
 ```
 
-See `docs/architecture.md` for the layer model and `docs/profiling.md` for the timing schema.
+The core goals are:
 
-## Quick Start
+- benchmark the same prompt, seed, model, backend, shape, and quality settings repeatably
+- record phase-level and denoise-step timings with MLX synchronization where needed
+- keep model-specific loading and execution inside backend adapters
+- write benchmark data to JSONL so runs can be appended, compared, and audited
+- generate Markdown summaries from structured benchmark records
+- make optimization work start from measured bottlenecks, not guesses
+
+The initial implementation is Python + MLX. Rust, Swift, custom inference engines, MLX upstream changes, and custom Metal kernels are out of scope until profiling data proves a specific need.
+
+## How To Use
+
+Install the development environment:
 
 ```bash
 uv sync --extra dev
-uv run fastgen-profile
-uv run fastgen-profile run
-uv run fastgen-profile models
 ```
 
-Use `uv run` when the virtual environment is not activated:
+Inspect the CLI:
+
+```bash
+uv run fastgen-profile --help
+uv run fastgen-profile run --help
+uv run fastgen-profile profile --help
+uv run fastgen-profile models --help
+```
+
+The installed command in this checkout is `fastgen-profile`; `fastgen-profiler` is also registered as a compatibility alias.
+
+Run a safe smoke benchmark with the deterministic stub backend:
 
 ```bash
 uv run fastgen-profile run \
@@ -52,10 +53,17 @@ uv run fastgen-profile run \
   --seed 7 \
   --output-dir artifacts/videos \
   --result-jsonl artifacts/results.jsonl
-uv run fastgen-profile report --input artifacts/results.jsonl --output artifacts/report.md
 ```
 
-Run the full preset suite for one model and generate comparison output:
+Generate a Markdown report from a JSONL result file:
+
+```bash
+uv run fastgen-profile report \
+  --input artifacts/results.jsonl \
+  --output artifacts/report.md
+```
+
+Run the full preset suite for one model:
 
 ```bash
 uv run fastgen-profile profile \
@@ -65,47 +73,23 @@ uv run fastgen-profile profile \
   --seed 7
 ```
 
-By default this writes `artifacts/profiles/YYYYMMDD_HHmmSST{locale}_wan2.2.jsonl` and a matching Markdown report beside it. The console summary and report compare preset variants by total time, phase breakdown, average denoise step time, peak memory, skipped/failed runs, and the recommended next bottleneck to inspect.
+By default, `profile` writes a JSONL file under `artifacts/profiles/` and a matching `.md` report beside it.
 
-Or activate the virtual environment first:
-
-```bash
-source .venv/bin/activate
-fastgen-profile
-```
-
-## Development
-
-```bash
-uv sync --extra dev
-uv run pytest
-uv run fastgen-profile --help
-uv run fastgen-profile profile --help
-```
-
-To include optional MLX dependencies:
+To use real MLX backends, install the optional MLX dependencies and point the CLI at local model files:
 
 ```bash
 uv sync --extra dev --extra mlx
 ```
 
-Running `fastgen-profile` without arguments in an interactive terminal opens a menu for common tasks, including importing local model directories into `.env`.
-`fastgen-profile run` and `fastgen-profile models` also open interactive prompts when required values are omitted in a terminal.
+Register or discover local generation model directories:
 
-Available run presets:
+```bash
+uv run fastgen-profile models list --model-dir /path/to/models
+uv run fastgen-profile models import --source all
+uv run fastgen-profile models import --source huggingface --dry-run
+```
 
-- `smoke`
-- `small-baseline`
-- `quality-threshold`
-- `stress`
-- `cache-experiment`
-- `compile-experiment`
-
-If `--preset` is omitted and the full manual shape is not provided, the CLI prompts for one of these presets in an interactive terminal.
-
-## Local Models
-
-Register local model roots with CLI options or `.env`:
+Model discovery uses `.env` and CLI-provided directories. Supported `.env` keys include:
 
 ```bash
 FASTGEN_MODEL_DIRS=/Users/me/DrawThings/Models:/Users/me/.cache/huggingface/hub
@@ -113,26 +97,11 @@ FASTGEN_MODEL_DIR_WAN22=/Volumes/models/wan
 FASTGEN_MODEL_DIR_LTX23=/Volumes/models/ltx
 ```
 
-List discovered candidates:
+Use `--model-path /exact/model/dir` to bypass discovery, or repeat `--model-dir` to add search roots. Model import registers directories only; it does not copy, move, convert, or download model files.
 
-```bash
-uv run fastgen-profile models list --model-dir /path/to/models
-```
+Current caveat: the LTX2.3 MLX adapter can request a missing text encoder through its guarded auto-download helper. That path runs a memory guard before network access, but it is a code-level exception to the repository goal of no automatic model downloads by default.
 
-`models list` prints all discovered Wan2.2 and LTX2.3 generation model candidates by default. Pass `--model wan2.2` or `--model ltx2.3` only when you want to filter the list.
-
-Import known local model roots, scan them for Wan2.2/LTX2.3 generation model directories, and write only those model directories into `.env`:
-
-```bash
-uv run fastgen-profile models import --source all
-uv run fastgen-profile models import --source huggingface --dry-run
-```
-
-Supported import sources are `drawthings`, `comfyui`, `huggingface`, `lmstudio`, `ollama`, and `all`. Importing registers directories only; it does not copy, move, convert, or download model files.
-Import replaces the existing `FASTGEN_MODEL_DIRS` value with Wan2.2/LTX2.3 generation model candidate directories found in the current scan. LM Studio/Ollama LLM-only and GGUF-only directories are skipped. If no generation model candidates are found, the command exits with an error and does not change `.env`.
-Draw Things discovery checks both `~/Library/Containers/Draw Things/Data` and `~/Library/Containers/com.liuliu.draw-things/Data`, including their `Documents/Models` subdirectories.
-
-Convert local checkpoints to the MLX directory layout expected by benchmarks:
+Convert local checkpoints to the MLX directory layout used by the benchmark adapters:
 
 ```bash
 uv run fastgen-profile models convert \
@@ -151,20 +120,75 @@ uv run fastgen-profile models convert \
   --register
 ```
 
-`--register` adds the converted output directory to `.env` so later benchmark commands can discover it. Use `--dry-run` to print the conversion command without running it.
-
-Use a specific model:
+Run a smoke benchmark against a local MLX model:
 
 ```bash
 uv run fastgen-profile run \
   --preset smoke \
   --model wan2.2 \
   --backend mlx \
-  --model-id owner/wan-local \
+  --model-path /path/to/Wan2.2-TI2V-5B-MLX \
   --prompt "a cinematic mountain flythrough" \
   --seed 7 \
   --output-dir artifacts/videos \
   --result-jsonl artifacts/results.jsonl
 ```
 
-`--model-path /exact/model/dir` bypasses discovery. `--model-dir` can be repeated and is combined with `.env` directories.
+When `fastgen-profile` is run without arguments in an interactive terminal, it opens a small menu for common tasks. Non-interactive runs require the needed options explicitly.
+
+## About Benchmark
+
+Benchmark records are JSONL. Each line is one measurement record, grouped by `run_id`; the Markdown report is a readable view of that structured data, not the source of truth.
+
+Every run records stable inputs and metadata, including:
+
+- model, backend, model path or id, and source root
+- prompt and negative prompt hashes
+- seed, width, height, frames, FPS, steps, guidance, quant, cache, and compile settings
+- phase name, denoise step index where relevant, elapsed seconds, memory fields, output path, and error
+- profile id, profile name, preset, variant label, and machine metadata
+
+The measured phases are:
+
+- `model_load`
+- `prompt_prepare`
+- `text_encoder`
+- `latent_init`
+- `denoise_total`
+- `denoise_step`
+- `vae_decode`
+- `video_encode`
+- `file_write`
+- `total`
+
+Built-in presets:
+
+- `smoke`: 384x384, 16 frames, 8 steps, no video by default
+- `small-baseline`: 512x512, 24 frames, 16 steps, guidance and quant variants
+- `quality-threshold`: 720x480, 48 frames, step-count variants, saves video by default
+- `stress`: 1280x720, 81 frames, Wan2.2 only for now
+- `cache-experiment`: compares `none`, `prompt`, `feature`, and `all`
+- `compile-experiment`: compares compile `off` and `on`
+
+`profile` runs the full preset suite for the selected model. For LTX2.3, the stress preset is recorded as skipped until that backend path is stable enough for the stress shape.
+
+Benchmark comparison is only meaningful when prompt, seed, model, backend, resolution, frames, steps, and relevant quality settings are controlled. Change one dimension at a time when possible.
+
+Real MLX/Metal runs are safety guarded. Run shapes are capped, JSONL read/write sizes are bounded, memory guard failures are recorded as benchmark errors, and heavy model execution is intended to be opt-in with local model files. The stub backend is the default way to verify CLI, JSONL, and report behavior without weights.
+
+## Development
+
+Run tests:
+
+```bash
+uv run pytest -q
+```
+
+Useful docs:
+
+- `docs/architecture.md`
+- `docs/profiling.md`
+- `docs/benchmark-matrix.md`
+- `docs/memory-safety.md`
+- `docs/model-targets.md`
+- `docs/optimization-roadmap.md`
