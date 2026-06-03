@@ -216,29 +216,47 @@ class MLXBackend(BackendAdapter):
         )
 
         # Phase: denoise_total + denoise_step (N steps)
-        denoise_started = perf_counter()
-        for step_index in range(config.steps):
-            with timed_section() as timing:
-                latents = pipeline.denoise_step(
-                    latents,
-                    step_index=step_index,
-                    steps=config.steps,
-                    guidance=config.guidance,
-                    cache=config.cache or "none",
-                )
+        # Use denoise_all when available (compiled full-loop, faster)
+        use_denoise_all = hasattr(pipeline, "denoise_all") and config.compile == "on"
+        if use_denoise_all:
+            denoise_started = perf_counter()
+            latents = pipeline.denoise_all(
+                latents,
+                steps=config.steps,
+                guidance=config.guidance,
+                cache=config.cache or "none",
+            )
+            denoise_total_seconds = perf_counter() - denoise_started
             records.append(
                 self.record(
                     config, run_id=run_id, timestamp_utc=timestamp_utc, machine=machine,
-                    phase="denoise_step", step_index=step_index, seconds=timing["seconds"],
+                    phase="denoise_total", seconds=denoise_total_seconds,
                 )
             )
-        denoise_total_seconds = perf_counter() - denoise_started
-        records.append(
-            self.record(
-                config, run_id=run_id, timestamp_utc=timestamp_utc, machine=machine,
-                phase="denoise_total", seconds=denoise_total_seconds,
+        else:
+            denoise_started = perf_counter()
+            for step_index in range(config.steps):
+                with timed_section() as timing:
+                    latents = pipeline.denoise_step(
+                        latents,
+                        step_index=step_index,
+                        steps=config.steps,
+                        guidance=config.guidance,
+                        cache=config.cache or "none",
+                    )
+                records.append(
+                    self.record(
+                        config, run_id=run_id, timestamp_utc=timestamp_utc, machine=machine,
+                        phase="denoise_step", step_index=step_index, seconds=timing["seconds"],
+                    )
+                )
+            denoise_total_seconds = perf_counter() - denoise_started
+            records.append(
+                self.record(
+                    config, run_id=run_id, timestamp_utc=timestamp_utc, machine=machine,
+                    phase="denoise_total", seconds=denoise_total_seconds,
+                )
             )
-        )
 
         # Phase: vae_decode
         with timed_section() as timing:

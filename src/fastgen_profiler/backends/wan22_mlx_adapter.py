@@ -747,6 +747,80 @@ class Wan22MLXPipeline:
         if abort is not None:
             raise abort
 
+    def denoise_all(self, latents: Any, *, steps: int, guidance: float, cache: str) -> Any:
+        """Run the full denoise loop with compiled model forward for faster steps."""
+        self._fail_if_runtime_failed("denoise_all")
+        if self.mx is None or self.model is None or self.scheduler is None or self.config is None:
+            raise RuntimeError("denoise_all called before load_model")
+        if self.seq_len is None or self.cross_kv is None or self.rope_cos_sin is None:
+            raise RuntimeError("denoise_all called before encode_text")
+        if self.cfg_disabled and self.context_cond is None:
+            raise RuntimeError("denoise_all called before encode_text")
+        if not self.cfg_disabled and self.context_cfg is None:
+            raise RuntimeError("denoise_all called before encode_text")
+
+        mx = self.mx
+        scheduler = self.scheduler
+        context = self.context_cond if self.cfg_disabled else self.context_cfg
+        seq_len = self.seq_len
+        cfg_disabled = self.cfg_disabled
+        timestep_list = scheduler.timesteps.tolist()
+
+        # Use compiled model forward (set during load_model)
+        _call = getattr(self.model, "_compiled", self.model)
+
+        for i in range(steps):
+            timestep_val = timestep_list[i]
+            if cfg_disabled:
+                t_batch = mx.array([timestep_val])
+                preds = _call(
+                    [latents], t=t_batch, context=context,
+                    seq_len=seq_len, cross_kv_caches=self.cross_kv,
+                    rope_cos_sin=self.rope_cos_sin,
+                )
+                noise_pred = preds[0]
+            else:
+                t_batch = mx.array([timestep_val, timestep_val])
+                preds = _call(
+                    [latents, latents], t=t_batch, context=context,
+                    seq_len=seq_len, cross_kv_caches=self.cross_kv,
+                    rope_cos_sin=self.rope_cos_sin,
+                )
+                noise_pred_cond, noise_pred_uncond = preds[0], preds[1]
+                noise_pred = noise_pred_uncond + guidance * (noise_pred_cond - noise_pred_uncond)
+                del noise_pred_cond, noise_pred_uncond
+            latents = scheduler.step(noise_pred[None], timestep_val, latents[None]).squeeze(0)
+            mx.eval(latents)
+
+        return latents
+
+    def generate_direct(self, *, prompt: str, negative_prompt: str | None) -> dict[str, object]:
+        """Call mlx_video generate_video() directly — full pipeline in one shot."""
+        self._fail_if_runtime_failed("generate_direct")
+        if importlib.util.find_spec("mlx_video") is None:
+            raise ModuleNotFoundError("mlx_video required for generate_direct")
+
+        from mlx_video.models.wan_2.generate import generate_video
+        import tempfile
+
+        output_path = str(self.model_path / "_bench_output.mp4")
+        no_compile = self.compile != "on"
+
+        result = generate_video(
+            model_dir=str(self.model_path),
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=self.width,
+            height=self.height,
+            num_frames=self.frames,
+            steps=self.steps,
+            guide_scale=self.guidance,
+            seed=self.seed,
+            output_path=output_path,
+            no_compile=no_compile,
+        )
+        return {"output_path": output_path, "result": result}
+
     def decode(self, latents: Any) -> Any:
         self._fail_if_runtime_failed("decode")
         if self.mx is None or self.config is None:
