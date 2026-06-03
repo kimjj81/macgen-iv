@@ -64,6 +64,8 @@ def _flatten_parameter_names(parameters: Any, prefix: str = "", *, label: str = 
 
 
 def _parameter_key_text(key: Any, *, label: str) -> str:
+    if isinstance(key, int):
+        key = str(key)
     if not isinstance(key, str):
         key_type = type(key)
         _raise_runtime_abort(
@@ -1563,6 +1565,9 @@ class _FilteredWeightItems:
         self.match_count = 1 if first_match is not None else 0
         self.matched_keys: set[str] = set()
 
+
+    def __len__(self):
+        return self.match_count
     def __iter__(self):
         if self._first_match is not None:
             key, value = self._first_match
@@ -1638,6 +1643,9 @@ class _MappedLTXTextEncoderWeightItems:
         self._label = label
         self._first_match = first_match
         self._scanned = scanned
+
+    def __len__(self):
+        return self.match_count
         self.match_count = 1 if first_match is not None else 0
         self.matched_keys: set[str] = set()
 

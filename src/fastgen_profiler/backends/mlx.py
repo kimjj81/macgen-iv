@@ -27,25 +27,33 @@ class MLXBackend(BackendAdapter):
     def _resolve_adapter(self, config: RunConfig):
         """Return (module_path, class_name, kwargs) or None."""
         model = (config.model or "").lower()
+        adapter_kwargs = dict(
+            model_path=Path(config.model_path) if config.model_path else Path("."),
+            seed=config.seed,
+            width=config.width,
+            height=config.height,
+            frames=config.frames,
+            steps=config.steps,
+            fps=config.fps,
+            guidance=config.guidance,
+            quant=config.quant or "none",
+            cache=config.cache or "none",
+            compile=config.compile or "off",
+            save_video=config.save_video,
+            dry_run=config.dry_run,
+        )
         if "wan" in model and ("2.2" in model or "22" in model):
             return (
                 "fastgen_profiler.backends.wan22_mlx_adapter",
                 "Wan22MLXPipeline",
-                dict(
-                    model_path=Path(config.model_path) if config.model_path else Path("."),
-                    seed=config.seed,
-                    width=config.width,
-                    height=config.height,
-                    frames=config.frames,
-                    steps=config.steps,
-                    fps=config.fps,
-                    guidance=config.guidance,
-                    quant=config.quant or "none",
-                    cache=config.cache or "none",
-                    compile=config.compile or "off",
-                    save_video=config.save_video,
-                    dry_run=config.dry_run,
-                ),
+                adapter_kwargs,
+            )
+        if "ltx" in model and ("2.3" in model or "23" in model):
+            adapter_kwargs["auto_download"] = True
+            return (
+                "fastgen_profiler.backends.ltx23_mlx_adapter",
+                "LTX23MLXPipeline",
+                adapter_kwargs,
             )
         return None
 

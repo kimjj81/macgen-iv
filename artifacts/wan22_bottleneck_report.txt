@@ -1,0 +1,56 @@
+===============================================================================================
+Wan2.2-TI2V-5B Bottleneck Benchmark — M4 Ultra 128GB
+===============================================================================================
+설정: 832x480, 41 frames, guidance 3.5, 24fps, no quant, no cache, compile off
+
+Steps |   Total |   Load |    T5 | Denoise |  Early |   Late |    VAE
+------------------------------------------------------------------------------
+   20 |    82.7 |   4.57 | 0.682 |    56.0 |  2495ms |  2985ms |   21.0
+   28 |   110.4 |   3.41 | 0.676 |    84.6 |  2717ms |  3255ms |   21.3
+   32 |   170.4 |   3.42 | 0.689 |   141.0 |  4093ms |  4586ms |   24.8
+   40 |   206.8 |   3.36 | 0.671 |   177.9 |  4369ms |  4450ms |   24.4
+   48 |   171.3 |   3.31 | 0.657 |   145.9 |  2698ms |  3266ms |   21.0
+
+Phase breakdown (steps=40, total=206.8s):
+  model_load               3.36s (  1.6%)
+  text_encoder             0.67s (  0.3%)
+  denoise_total          177.90s ( 86.0%)  <<<< 1차 병목
+  vae_decode              24.41s ( 11.8%)  <<<< 2차 병목
+  other                    0.49s (  0.2%)
+
+Per-step timing (steps=40):
+  step 0:  2474ms (콜드 스타트, steady state의 55%)
+  step 1:  4793ms (최고)
+  step 2-39: 4400-4600ms (안정, noise schedule 영향 거의 없음)
+
+Scaling:
+  steps=20: overhead +0.0%  (베이스라인)
+  steps=28: overhead +7.9%  (근선형)
+  steps=32: overhead +57.4% (급격 틀어짐)
+  steps=40: overhead +58.9% (32 이후 다시 근선형)
+  steps=48: overhead +8.6%  (?? 비정상적으로 빠름 — 시스템 상태 영향)
+
+참고: steps=48이 steps=32/40보다 빠른 건 이전 실행들의 MLX cache warming 효과
+      가능성. cold start 기준으로 32에서 overhead 발생.
+
+병목 분석:
+  1. denoise (86%): transformer attention + FFN — 4.4s/step
+     - step 0 콜드 스타트: 2.5s (캐시 미스)
+     - step 1+: 4.4-4.8s (steady)
+     - 32 steps에서 scaling break → 메모리/GPU 스케줄링 한계?
+     
+  2. vae_decode (12%): 3D spatial-temporal deconv — 21-25s
+     - steps 수와 무관 (상수)
+     - 해상도에 비례
+     
+  3. model_load (1.6%): 3.3-4.6s — disk I/O
+  4. text_encoder (0.3%): 0.67s — T5 forward pass
+
+최적화 타겟 (우선순위):
+  1. denoise per-step: 4.4s → attention quantization, mx.compile, flash attention
+  2. denoise step 0: 2.5s → pre-warm 캐시
+  3. vae_decode: 24s → tiled decode, fp16
+  4. scaling break at 32: 조사 필요 (MLX 메모리 압력? GPU thermal?)
+
+데이터 파일:
+  artifacts/bottleneck_bench/steps{20,28,32,40,48}.jsonl
