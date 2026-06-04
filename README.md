@@ -196,3 +196,8 @@ Useful docs:
 - `docs/engine-profiling-wan22.md` — Wan2.2 engine-level profiling: per-component bottleneck analysis
 - `docs/2026-06-04-ffn-optimization-experiments.md` — FFN optimization experiment report
 - `docs/2026-06-04-vae-optimization-experiments.md` — VAE decode optimization experiment report
+- `docs/2026-06-04-vae-optimization-round2.md` — VAE round 2: native 3D conv, Metal kernel, depth-chunked
+
+## Future Work
+
+- **MLX 3D convolution optimization** — Filed [ml-explore/mlx#3625](https://github.com/ml-explore/mlx/issues/3625). MLX `conv_general` 5D is 2-5x slower than per-frame 2D decomposition. An optimized 3D conv Metal kernel would reduce VAE decode time by 15-40% for all video generation workloads. This is the single highest-impact upstream contribution opportunity identified from profiling.
