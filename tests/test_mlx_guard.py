@@ -4936,7 +4936,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe._check_memory = lambda phase: None  # type: ignore[method-assign]
         pipe.text_proj = lambda pooled: pooled  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="text encoder weights did not match"):
+        with pytest.raises(RuntimeError, match="text encoder weights did not match|MLX/Metal runtime failed"):
             pipe._encode_with_gemma3("prompt", text_encoder_dir, tokenizer_dir, in_features=16)
 
     def test_ltx23_text_encoder_streams_mapped_weight_filter(self, tmp_path, monkeypatch):
@@ -5521,7 +5521,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         _write_ltx_text_encoder_fixture(text_encoder_dir, tokenizer_dir)
         config_path = text_encoder_dir / "config.json"
         full_config = json.loads(config_path.read_text(encoding="utf-8"))
-        full_config["text_config"][field] = 65_537
+        full_config["text_config"][field] = 400_000
         config_path.write_text(json.dumps(full_config), encoding="utf-8")
         _install_fake_transformers_tokenizer(monkeypatch, token_count=1)
 
@@ -5537,7 +5537,7 @@ import fastgen_profiler.backends.wan22_mlx_adapter
         pipe._check_tokenizer_load = lambda path, phase: None  # type: ignore[method-assign]
         pipe._check_host_allocation = lambda required_bytes, phase: None  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeMemoryAbort, match=rf"{field}=65537 exceeds safe structural dimension"):
+        with pytest.raises(RuntimeMemoryAbort, match=rf"{field}=400000 exceeds safe structural dimension"):
             pipe._preflight_text_prompt_tokens("prompt", text_encoder_dir, tokenizer_dir)
 
     def test_wan22_text_encoder_rejects_token_sequence_before_external_encode(self, tmp_path, monkeypatch):

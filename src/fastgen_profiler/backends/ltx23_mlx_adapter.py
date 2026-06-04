@@ -28,6 +28,7 @@ _MAX_DENOISE_STEPS = 512
 _MAX_FILTERED_WEIGHT_ITEMS = 100_000
 _MAX_PARAMETER_NAMES = 100_000
 _MAX_PARAMETER_NAME_CHARS = 1024
+_MAX_CONFIG_DIMENSION = 300_000
 _MAX_PARAMETER_NAME_DEPTH = 256
 _MAX_CONFIG_JSON_ITEMS = 10_000
 _MAX_CONFIG_JSON_DEPTH = 32
@@ -108,8 +109,6 @@ def _add_parameter_name(result: set[str], name: str, *, label: str) -> None:
 
 class LTX23MLXPipeline:
     """Pipeline object implementing the macgen-profile LTX2.3 phase contract."""
-
-    _MAX_CONFIG_DIMENSION = 300_000
 
     def __init__(
         self,
@@ -383,12 +382,12 @@ class LTX23MLXPipeline:
                     f"LTX2.3 config field {key}={value} must be a positive structural dimension; "
                     "refusing to construct MLX model"
                 )
-            if value > self._MAX_CONFIG_DIMENSION and _is_structural_config_key(key):
+            if value > _MAX_CONFIG_DIMENSION and _is_structural_config_key(key):
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
                 raise RuntimeMemoryAbort(
                     f"LTX2.3 config field {key}={value} exceeds safe structural dimension "
-                    f"{self._MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
+                    f"{_MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
                 )
 
         channels = _positive_structural_int(config_dict.get("in_channels", 128), "in_channels")
@@ -425,12 +424,12 @@ class LTX23MLXPipeline:
                     f"LTX2.3 config field {key}={value} must be a positive structural dimension; "
                     "refusing to construct MLX model"
                 )
-            if value > self._MAX_CONFIG_DIMENSION:
+            if value > _MAX_CONFIG_DIMENSION:
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
                 raise RuntimeMemoryAbort(
                     f"LTX2.3 config field {key}={value} exceeds safe structural dimension "
-                    f"{self._MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
+                    f"{_MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
                 )
         attention_floor = layers * hidden_size * hidden_size * 4
         mlp_floor = layers * hidden_size * intermediate_size * 3
@@ -479,12 +478,12 @@ class LTX23MLXPipeline:
                     f"LTX2.3 text encoder config field {key}={value} must be a positive structural dimension; "
                     "refusing to construct MLX text model"
                 )
-            if value > self._MAX_CONFIG_DIMENSION:
+            if value > _MAX_CONFIG_DIMENSION:
                 from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
 
                 raise RuntimeMemoryAbort(
                     f"LTX2.3 text encoder config field {key}={value} exceeds safe structural dimension "
-                    f"{self._MAX_CONFIG_DIMENSION}; refusing to construct MLX text model"
+                    f"{_MAX_CONFIG_DIMENSION}; refusing to construct MLX text model"
                 )
         attention_floor = layers * hidden_size * hidden_size * 4
         mlp_floor = layers * hidden_size * intermediate_size * 3
@@ -1160,6 +1159,49 @@ class LTX23MLXPipeline:
         if abort is not None:
             raise abort
 
+    def generate_direct(self, *, prompt: str, negative_prompt: str | None) -> dict[str, object]:
+        """Call mlx_video generate_video() directly — full pipeline in one shot.
+
+        Uses the DEV pipeline (single-stage, no spatial upscaler needed).
+        """
+        self._fail_if_runtime_failed("generate_direct")
+        if importlib.util.find_spec("mlx_video") is None:
+            raise ModuleNotFoundError("mlx_video required for generate_direct")
+
+        from mlx_video.models.ltx_2.generate import generate_video, PipelineType
+
+        text_encoder_dir = self.text_encoder_dir
+        if text_encoder_dir is None:
+            # Try sibling directory convention
+            candidate = self.model_path.parent / "LTX-2-text-local"
+            if candidate.exists():
+                text_encoder_dir = candidate
+            else:
+                raise FileNotFoundError(
+                    "No text encoder directory found for LTX generate_direct. "
+                    "Pass --text-encoder-dir or place LTX-2-text-local next to the model."
+                )
+
+        output_path = str(self.model_path / "_bench_output.mp4")
+
+        result = generate_video(
+            model_repo=str(self.model_path),
+            text_encoder_repo=str(text_encoder_dir),
+            prompt=prompt,
+            negative_prompt=negative_prompt or "",
+            height=self.height,
+            width=self.width,
+            num_frames=self.frames,
+            num_inference_steps=self.steps,
+            cfg_scale=self.guidance,
+            seed=self.seed,
+            fps=self.fps,
+            output_path=output_path,
+            verbose=True,
+            pipeline=PipelineType.DEV,
+        )
+        return {"output_path": output_path, "result": result}
+
     def encode_video(self, frames: Any, *, fps: int) -> Any | Path:
         self._fail_if_runtime_failed("video_encode")
         frame_shape = self._validate_frame_shape(frames, "video_encode")
@@ -1293,6 +1335,13 @@ def _positive_structural_int(value: Any, key: str) -> int:
         raise RuntimeMemoryAbort(
             f"LTX2.3 config field {key}={result} must be a positive structural dimension; "
             "refusing to construct MLX model"
+        )
+    if result > _MAX_CONFIG_DIMENSION:
+        from fastgen_profiler.mlx_guard import RuntimeMemoryAbort
+
+        raise RuntimeMemoryAbort(
+            f"LTX2.3 config field {key}={result} exceeds safe structural dimension "
+            f"limit {_MAX_CONFIG_DIMENSION}; refusing to construct MLX model"
         )
     return result
 
@@ -1643,11 +1692,11 @@ class _MappedLTXTextEncoderWeightItems:
         self._label = label
         self._first_match = first_match
         self._scanned = scanned
+        self.match_count = 1 if first_match is not None else 0
+        self.matched_keys: set[str] = set()
 
     def __len__(self):
         return self.match_count
-        self.match_count = 1 if first_match is not None else 0
-        self.matched_keys: set[str] = set()
 
     def __iter__(self):
         if self._first_match is not None:
