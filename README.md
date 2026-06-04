@@ -192,4 +192,5 @@ Useful docs:
 - `docs/memory-safety.md`
 - `docs/model-targets.md`
 - `docs/optimization-roadmap.md`
-- `docs/benchmark-results.md` — Wan2.2 MLX benchmark results and optimization analysis
+- `docs/benchmark-results.md` — Wan2.2 + LTX-2.3 benchmark results and optimization analysis
+- `docs/engine-profiling-wan22.md` — Wan2.2 engine-level profiling: per-component bottleneck analysis
