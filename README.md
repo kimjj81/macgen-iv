@@ -195,3 +195,4 @@ Useful docs:
 - `docs/benchmark-results.md` — Wan2.2 + LTX-2.3 benchmark results and optimization analysis
 - `docs/engine-profiling-wan22.md` — Wan2.2 engine-level profiling: per-component bottleneck analysis
 - `docs/2026-06-04-ffn-optimization-experiments.md` — FFN optimization experiment report
+- `docs/2026-06-04-vae-optimization-experiments.md` — VAE decode optimization experiment report
