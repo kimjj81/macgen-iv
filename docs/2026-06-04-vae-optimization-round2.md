@@ -114,6 +114,31 @@ bf16 → fp16                             1.00x       n/a
 2. `mx.eval()` 없이는 메모리 압박으로 느려짐
 3. 이 trade-off를 파이썬 수준에서 해결 불가
 
+### 전체 파이프라인 적용 결과
+
+```
+Full pipeline (832x480, 41 frames, 10 steps, interval_cfg=5):
+
+Configuration                    Total    Denoise   VAE
+──────────────────────────────────────────────────────────────
+Baseline (no compile)            68.5s    26.1s    33.0s (tiled)
+Compiled model                   70.0s    26.7s    22.5s (tiled)
+
+VAE standalone (random latents):
+  Original:                      17.0s
+  Depth-chunked:                 19.2s   (0.89x, 12% 느림)
+
+VAE tiled (same as pipeline):
+  Original:                      23.5s
+  Depth-chunked:                 25.5s   (0.92x, 8% 느림)
+
+Pipeline estimate:               0.96x (4% 느림)
+```
+
+**전체 파이프라인에서도 4-8% 느림.** 
+개별 conv3d 연산은 빠르지만, VAE decode 전체에서는 mx.eval() 배리어와 
+chunking 오버헤드가 상쇄. 특히 ups3 (240×416)에서 개선이 1.03x에 불과.
+
 ### 남은 옵션
 
 1. **MLX upstream에 3D conv 최적화 기여** — 근본 해결
