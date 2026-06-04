@@ -165,5 +165,54 @@ MACGEN_ALLOW_PARENT_MLX=1 uv run fastgen-profile run \
 
 1. **Tiled VAE decode** — reduce the 27% VAE share and lower peak memory
 2. **Thermal-aware scheduling** — brief pauses between steps to let GPU clock recover
-3. **LTX-2.3 adapter** — text projection structure mismatch needs resolution
-4. **Quality evaluation** — side-by-side comparison of cfg-steps=5 vs full CFG at multiple guidance values
+3. **Quality evaluation** — side-by-side comparison of cfg-steps=5 vs full CFG at multiple guidance values
+
+---
+
+## LTX-2.3 22B Distilled MLX Benchmark
+
+### Hardware & Software
+
+| Item | Value |
+|---|---|
+| Chip | Apple M4 Ultra |
+| Memory | 128 GB unified |
+| OS | macOS 26.5 Tahoe |
+| Backend | MLX, mlx_video DEV pipeline |
+| Model | LTX-2.3-22B-Distilled (MLX converted, BF16) |
+| Text Encoder | Gemma 3 12B-IT (local) |
+| Pipeline | DEV (single-stage, CFG enabled) |
+| Seed | 42 |
+
+### Results
+
+| Resolution | Frames | Steps | Total Time | Per-frame | Peak Memory |
+|---|---|---|---|---|---|
+| 256×160 | 9 | 10 | 16.6s | 1.85s | 35.56 GB |
+| 512×320 | 41 | 20 | 82.0s | 2.00s | 36.19 GB |
+| 512×320 | 41 | 40 | 220.5s | 5.38s | — |
+
+### Observations
+
+- **Per-frame cost**: 1.85–2.00s/frame at 20 steps, consistent across resolutions
+- **Peak memory**: ~36 GB (model weights + KV cache + activations). Comfortable on 128 GB
+- **Step scaling**: Linear — 20→40 steps = 2.7× time (expected 2×, extra from thermal throttling)
+- **40-step slowdown**: 5.38s/frame vs 2.00s at 20 steps — sustained GPU load causes significant thermal throttling
+- **No spatial upscaler**: DEV pipeline runs single-stage. DISTILLED pipeline requires `latent_upsampler/` which is not present in current model directory
+
+### Comparison: Wan2.2 vs LTX-2.3
+
+| Model | Resolution | Frames | Steps | Total | Per-frame | Peak Mem |
+|---|---|---|---|---|---|---|
+| Wan2.2 5B (cfg-steps=5) | 832×480 | 41 | 20 | 48.2s | 1.18s | 33.6 GB |
+| Wan2.2 5B (full CFG) | 832×480 | 41 | 20 | 71.4s | 1.74s | 33.6 GB |
+| LTX-2.3 22B | 512×320 | 41 | 20 | 82.0s | 2.00s | 36.2 GB |
+
+Wan2.2 5B with interval CFG is **1.7× faster** than LTX-2.3 22B at comparable frame counts, despite running at 2.6× higher resolution (832×480 vs 512×320).
+
+### Reproduce
+
+```bash
+# LTX-2.3 native benchmark
+MACGEN_ALLOW_PARENT_MLX=1 uv run python scripts/bench_ltx23_native.py
+```
