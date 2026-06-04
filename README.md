@@ -192,3 +192,4 @@ Useful docs:
 - `docs/memory-safety.md`
 - `docs/model-targets.md`
 - `docs/optimization-roadmap.md`
+- `docs/benchmark-results-wan22.md` — Wan2.2 MLX benchmark results and optimization analysis
